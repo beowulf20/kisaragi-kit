@@ -1,0 +1,10 @@
+version: 2
+
+builds:
+  - skip: true
+
+changelog:
+  sort: asc
+
+release:
+  mode: keep-existing

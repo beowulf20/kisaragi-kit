@@ -1,0 +1,7 @@
+.env
+.env.*
+bin/
+dist/
+coverage.out
+.codex/**
+.brooks*.json

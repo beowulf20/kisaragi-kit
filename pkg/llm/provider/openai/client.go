@@ -1,0 +1,194 @@
+package openai
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/beowulf20/kisaragi-kit/pkg/llm"
+	llmtool "github.com/beowulf20/kisaragi-kit/pkg/llm/tool"
+	openaisdk "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
+)
+
+type ClientConfig struct {
+	BaseURL string
+	APIKey  string
+	Timeout time.Duration
+}
+
+type Client struct {
+	config ClientConfig
+	client openaisdk.Client
+}
+
+func NewClient(config ClientConfig) (*Client, ClientConfig, error) {
+	config.BaseURL = strings.TrimRight(config.BaseURL, "/")
+	if config.BaseURL == "" {
+		return nil, config, errors.New("base URL cannot be empty")
+	}
+	if config.APIKey == "" {
+		return nil, config, errors.New("API key cannot be empty")
+	}
+
+	options := []option.RequestOption{
+		option.WithBaseURL(config.BaseURL),
+		option.WithAPIKey(config.APIKey),
+	}
+	if config.Timeout > 0 {
+		options = append(options, option.WithRequestTimeout(config.Timeout))
+	}
+
+	return &Client{
+		config: config,
+		client: openaisdk.NewClient(options...),
+	}, config, nil
+}
+
+func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks llm.CompletionHooks) (*llm.ChatResponse, error) {
+	if c == nil {
+		return nil, errors.New("openai client is nil")
+	}
+
+	messages := make([]openaisdk.ChatCompletionMessageParamUnion, 0, len(request.Messages))
+	for _, message := range request.Messages {
+		openAIMessage, err := openAIMessage(message)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, openAIMessage)
+	}
+
+	params := openaisdk.ChatCompletionNewParams{
+		Model:       openaisdk.ChatModel(request.Model),
+		Messages:    messages,
+		Temperature: openaisdk.Float(request.Temperature),
+	}
+	tools := openAIChatTools(request.Tools)
+	if len(tools) > 0 {
+		params.Tools = tools
+		params.ToolChoice = openaisdk.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openaisdk.Opt("auto")}
+	}
+
+	completion, err := c.streamingChatCompletion(ctx, params, hooks)
+	if err != nil {
+		return nil, err
+	}
+	if len(completion.Choices) == 0 {
+		return nil, errors.New("chat completion returned no choices")
+	}
+
+	message := completion.Choices[0].Message
+	response := &llm.ChatResponse{
+		Content: message.Content,
+	}
+	for _, toolCall := range message.ToolCalls {
+		if toolCall.Type != "function" {
+			return nil, fmt.Errorf("unsupported tool call type %q", toolCall.Type)
+		}
+		response.ToolCalls = append(response.ToolCalls, llm.ToolCall{
+			ID:        toolCall.ID,
+			Name:      toolCall.Function.Name,
+			Arguments: toolCall.Function.Arguments,
+		})
+	}
+	return response, nil
+}
+
+func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	if c == nil {
+		return nil, errors.New("openai client is nil")
+	}
+
+	models, err := c.client.Models.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, 0, len(models.Data))
+	for _, model := range models.Data {
+		ids = append(ids, model.ID)
+	}
+	return ids, nil
+}
+
+func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, error) {
+	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
+	acc := openaisdk.ChatCompletionAccumulator{}
+
+	for stream.Next() {
+		chunk := stream.Current()
+		if !acc.AddChunk(chunk) {
+			return nil, errors.New("chat completion stream accumulation failed")
+		}
+
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != "" {
+				hooks.EmitContentDelta(choice.Delta.Content)
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+
+	return &acc.ChatCompletion, nil
+}
+
+func openAIMessage(message llm.Message) (openaisdk.ChatCompletionMessageParamUnion, error) {
+	switch message.Type {
+	case llm.System:
+		return openaisdk.SystemMessage(message.Content), nil
+	case llm.User:
+		return openaisdk.UserMessage(message.Content), nil
+	case llm.Assistant:
+		if len(message.ToolCalls) > 0 {
+			return assistantToolCallMessage(message), nil
+		}
+		return openaisdk.AssistantMessage(message.Content), nil
+	case llm.Tool:
+		if strings.TrimSpace(message.ToolCallID) == "" {
+			return openaisdk.ChatCompletionMessageParamUnion{}, errors.New("tool message missing tool call ID")
+		}
+		return openaisdk.ToolMessage(message.Content, message.ToolCallID), nil
+	default:
+		return openaisdk.ChatCompletionMessageParamUnion{}, fmt.Errorf("unsupported message type %q", message.Type)
+	}
+}
+
+func assistantToolCallMessage(message llm.Message) openaisdk.ChatCompletionMessageParamUnion {
+	toolCalls := make([]openaisdk.ChatCompletionMessageToolCallUnionParam, 0, len(message.ToolCalls))
+	for _, toolCall := range message.ToolCalls {
+		toolCalls = append(toolCalls, openaisdk.ChatCompletionMessageToolCallUnionParam{
+			OfFunction: &openaisdk.ChatCompletionMessageFunctionToolCallParam{
+				ID: toolCall.ID,
+				Function: openaisdk.ChatCompletionMessageFunctionToolCallFunctionParam{
+					Name:      toolCall.Name,
+					Arguments: toolCall.Arguments,
+				},
+			},
+		})
+	}
+
+	return openaisdk.ChatCompletionMessageParamUnion{
+		OfAssistant: &openaisdk.ChatCompletionAssistantMessageParam{
+			Content:   openaisdk.ChatCompletionAssistantMessageParamContentUnion{OfString: openaisdk.String(message.Content)},
+			ToolCalls: toolCalls,
+		},
+	}
+}
+
+func openAIChatTools(tools []llmtool.ChatTool) []openaisdk.ChatCompletionToolUnionParam {
+	openAITools := make([]openaisdk.ChatCompletionToolUnionParam, 0, len(tools))
+	for _, tool := range tools {
+		openAITools = append(openAITools, openaisdk.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
+			Name:        tool.Name,
+			Description: openaisdk.String(tool.Description),
+			Parameters:  shared.FunctionParameters(tool.Parameters),
+		}))
+	}
+	return openAITools
+}
