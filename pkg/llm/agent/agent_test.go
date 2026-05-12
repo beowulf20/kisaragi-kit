@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
+	llmtool "github.com/beowulf20/kisaragi-kit/pkg/llm/tool"
 )
 
 func TestNewAgentValidatesInput(t *testing.T) {
@@ -159,6 +161,85 @@ func TestRunWithTransientMessageDoesNotPersistTransientInput(t *testing.T) {
 	}
 }
 
+func TestAgentForwardsToolErrorHook(t *testing.T) {
+	tools := llmtool.NewToolbox()
+	if err := tools.RegisterTool(llmtool.NewTool("fail", "Fails.", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, errors.New("boom")
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*llm.ChatResponse{
+			{ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "fail", Arguments: `{}`}}},
+			{Content: "done"},
+		},
+	}
+
+	var gotCall llm.ToolCall
+	var gotErr error
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("system prompt")},
+			Tools:    *tools,
+		},
+		Hooks: Hooks{
+			OnToolError: func(toolCall llm.ToolCall, err error) {
+				gotCall = toolCall
+				gotErr = err
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if gotCall.Name != "fail" || gotCall.ID != "call_1" {
+		t.Fatalf("tool call = %#v, want fail call_1", gotCall)
+	}
+	if gotErr == nil || gotErr.Error() != "boom" {
+		t.Fatalf("tool error = %v, want boom", gotErr)
+	}
+}
+
+func TestAgentForwardsCallErrorHook(t *testing.T) {
+	client := &fakeChatClient{
+		errors:    []error{errors.New("temporary")},
+		responses: []*llm.ChatResponse{{Content: "done"}},
+	}
+
+	var gotErr error
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("system prompt")},
+		},
+		Hooks: Hooks{
+			OnCallError: func(err error) {
+				gotErr = err
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if gotErr == nil || gotErr.Error() != "temporary" {
+		t.Fatalf("call error = %v, want temporary", gotErr)
+	}
+}
+
 func TestAsToolUsesAgentMetadataAndQueryInput(t *testing.T) {
 	agent, err := NewAgent(NewAgentInput{
 		Name:        "Smart Home",
@@ -213,11 +294,17 @@ func TestAsToolRejectsEmptyQuery(t *testing.T) {
 
 type fakeChatClient struct {
 	responses []*llm.ChatResponse
+	errors    []error
 	requests  []llm.ChatRequest
 }
 
 func (c *fakeChatClient) Complete(_ context.Context, request llm.ChatRequest, _ llm.CompletionHooks) (*llm.ChatResponse, error) {
 	c.requests = append(c.requests, request)
+	if len(c.errors) > 0 {
+		err := c.errors[0]
+		c.errors = c.errors[1:]
+		return nil, err
+	}
 	if len(c.responses) == 0 {
 		return &llm.ChatResponse{}, nil
 	}

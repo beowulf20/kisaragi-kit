@@ -109,10 +109,16 @@ func TestCompletionRetriesProviderErrorsByDefault(t *testing.T) {
 		responses: []*ChatResponse{{Content: "done"}},
 	}
 
+	var callErrors []string
 	output, err := Completion(CompletionCallInput{
 		Client:   client,
 		Model:    "test-model",
 		Messages: []Message{NewUserMessage("hello")},
+		Hooks: CompletionHooks{
+			OnCallError: func(err error) {
+				callErrors = append(callErrors, err.Error())
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +128,9 @@ func TestCompletionRetriesProviderErrorsByDefault(t *testing.T) {
 	}
 	if len(client.requests) != DefaultProviderErrorRetries+1 {
 		t.Fatalf("requests = %d, want %d", len(client.requests), DefaultProviderErrorRetries+1)
+	}
+	if strings.Join(callErrors, ",") != "temporary one,temporary two" {
+		t.Fatalf("call errors = %v, want temporary one and two", callErrors)
 	}
 }
 
@@ -198,6 +207,49 @@ func TestCompletionUsesConfiguredMaxToolErrorLength(t *testing.T) {
 	}
 	if !strings.Contains(output.ToolCalls[0].Result, `"error":"abc"`) {
 		t.Fatalf("tool result = %s, want truncated error", output.ToolCalls[0].Result)
+	}
+}
+
+func TestCompletionEmitsToolError(t *testing.T) {
+	tools := llmtool.NewToolbox()
+	if err := tools.RegisterTool(llmtool.NewTool("fail", "Fails.", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, errors.New("boom")
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{ToolCalls: []ToolCall{{ID: "call_1", Name: "fail", Arguments: `{}`}}},
+			{Content: "done"},
+		},
+	}
+
+	var gotCall ToolCall
+	var gotErr error
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("call tool")},
+		Tools:    *tools,
+		Hooks: CompletionHooks{
+			OnToolError: func(toolCall ToolCall, err error) {
+				gotCall = toolCall
+				gotErr = err
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if gotCall.Name != "fail" || gotCall.ID != "call_1" {
+		t.Fatalf("tool call = %#v, want fail call_1", gotCall)
+	}
+	if gotErr == nil || gotErr.Error() != "boom" {
+		t.Fatalf("tool error = %v, want boom", gotErr)
 	}
 }
 

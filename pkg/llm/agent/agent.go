@@ -36,8 +36,12 @@ type NewAgentInput struct {
 type Hooks struct {
 	// OnContentDelta receives streamed assistant text chunks.
 	OnContentDelta func(string)
+	// OnCallError runs after a provider chat call fails.
+	OnCallError func(error)
 	// OnToolCall runs before a requested tool is executed.
 	OnToolCall func(llm.ToolCall)
+	// OnToolError runs after a tool returns an error or invalid result.
+	OnToolError func(llm.ToolCall, error)
 	// OnToolResult runs after a tool returns or fails.
 	OnToolResult func(llm.ToolCall)
 }
@@ -114,7 +118,9 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 
 	input.Hooks = llm.CompletionHooks{
 		OnContentDelta: a.Hooks.OnContentDelta,
+		OnCallError:    a.Hooks.OnCallError,
 		OnToolCall:     a.Hooks.OnToolCall,
+		OnToolError:    a.Hooks.OnToolError,
 		OnToolResult:   a.Hooks.OnToolResult,
 	}
 

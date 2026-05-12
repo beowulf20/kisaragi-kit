@@ -154,6 +154,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 
 			result, err := input.Tools.Call(ctx, toolCall.Name, toolCall.Arguments)
 			if err != nil {
+				input.Hooks.EmitToolError(call, err)
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
 				if abort {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
@@ -167,6 +168,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			}
 			if result == nil {
 				err := fmt.Errorf("tool %q returned nil result", toolCall.Name)
+				input.Hooks.EmitToolError(call, err)
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
 				if abort {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
@@ -239,6 +241,7 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 		if err == nil {
 			return response, nil
 		}
+		hooks.EmitCallError(err)
 		lastErr = err
 	}
 	return nil, lastErr

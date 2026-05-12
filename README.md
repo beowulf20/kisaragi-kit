@@ -182,7 +182,9 @@ This lets a coordinator agent call specialist agents using the same tool loop.
 `CompletionHooks` and `agent.Hooks` support:
 
 - `OnContentDelta` for streaming text
+- `OnCallError` after a provider chat call fails
 - `OnToolCall` before a tool runs
+- `OnToolError` after a tool returns an error or invalid result
 - `OnToolResult` after a tool returns or fails
 
 ## Tests
