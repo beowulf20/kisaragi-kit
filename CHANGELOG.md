@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.1.0...v1.2.0) (2026-05-12)
+
+
+### Features
+
+* **llm:** add error hooks ([2e128a0](https://github.com/beowulf20/kisaragi-kit/commit/2e128a00c7345a0e0480f05ef30723dd625822d2))
+
 ## [1.1.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.0.0...v1.1.0) (2026-05-12)
 
 
