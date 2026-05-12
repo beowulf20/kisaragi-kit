@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// JSONSchemaFor returns an object JSON schema for values of type T.
 func JSONSchemaFor[T any]() map[string]any {
 	t := reflect.TypeOf((*T)(nil)).Elem()
 	schema := jsonSchemaForInputType(t)

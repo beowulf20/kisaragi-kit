@@ -7,27 +7,42 @@ import (
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
 )
 
+// Agent wraps completion configuration with persistent message history.
 type Agent struct {
-	Name        string
+	// Name identifies the agent and is used when exposing it as a tool.
+	Name string
+	// Description explains the agent's role when exposed as a tool.
 	Description string
-	Hooks       Hooks
+	// Hooks receives streaming content and tool execution events.
+	Hooks Hooks
 	llm.CompletionCallInput
 }
 
+// NewAgentInput configures a new Agent.
 type NewAgentInput struct {
-	Name         string
-	Description  string
+	// Name identifies the agent.
+	Name string
+	// Description explains the agent's role when exposed as a tool.
+	Description string
+	// SystemPrompt is prepended as a system message when set.
 	SystemPrompt string
-	Hooks        Hooks
-	Config       llm.CompletionCallInput
+	// Hooks receives streaming content and tool execution events.
+	Hooks Hooks
+	// Config contains the completion client, model, tools, and initial messages.
+	Config llm.CompletionCallInput
 }
 
+// Hooks contains optional callbacks emitted while an agent runs.
 type Hooks struct {
+	// OnContentDelta receives streamed assistant text chunks.
 	OnContentDelta func(string)
-	OnToolCall     func(llm.ToolCall)
-	OnToolResult   func(llm.ToolCall)
+	// OnToolCall runs before a requested tool is executed.
+	OnToolCall func(llm.ToolCall)
+	// OnToolResult runs after a tool returns or fails.
+	OnToolResult func(llm.ToolCall)
 }
 
+// NewAgent validates input and returns an agent with copied initial messages.
 func NewAgent(input NewAgentInput) (*Agent, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
@@ -51,14 +66,17 @@ func NewAgent(input NewAgentInput) (*Agent, error) {
 	}, nil
 }
 
+// AddMessage appends a message to the agent's persistent history.
 func (a *Agent) AddMessage(message llm.Message) {
 	a.Messages = append(a.Messages, message)
 }
 
+// MessagesSnapshot returns a copy of the agent's persistent history.
 func (a *Agent) MessagesSnapshot() []llm.Message {
 	return append([]llm.Message(nil), a.Messages...)
 }
 
+// CallWithUserMessage appends a user message and runs the agent.
 func (a *Agent) CallWithUserMessage(content string) (*llm.CompletionCallOutput, error) {
 	if strings.TrimSpace(content) == "" {
 		return nil, errors.New("user message cannot be empty")
@@ -67,10 +85,12 @@ func (a *Agent) CallWithUserMessage(content string) (*llm.CompletionCallOutput, 
 	return a.call()
 }
 
+// Run continues the agent from its current persistent history.
 func (a *Agent) Run() (*llm.CompletionCallOutput, error) {
 	return a.call()
 }
 
+// RunWithTransientMessage runs the agent with an extra message that is not stored.
 func (a *Agent) RunWithTransientMessage(message llm.Message) (*llm.CompletionCallOutput, error) {
 	if a == nil {
 		return nil, errors.New("agent is nil")

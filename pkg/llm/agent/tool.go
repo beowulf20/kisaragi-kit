@@ -9,6 +9,7 @@ import (
 	llmtool "github.com/beowulf20/kisaragi-kit/pkg/llm/tool"
 )
 
+// AsTool exposes the agent as a callable LLM tool.
 func (a *Agent) AsTool() llmtool.Tool {
 	if a == nil {
 		return llmtool.NewTool("agent", "Calls an agent.", func(_ context.Context, input agentToolInput) (agentToolOutput, error) {

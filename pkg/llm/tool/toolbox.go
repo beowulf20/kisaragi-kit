@@ -7,16 +7,19 @@ import (
 	"fmt"
 )
 
+// Toolbox stores registered tools and calls them by name.
 type Toolbox struct {
 	tools map[string]Tool
 }
 
+// NewToolbox returns an empty toolbox.
 func NewToolbox() *Toolbox {
 	return &Toolbox{
 		tools: make(map[string]Tool),
 	}
 }
 
+// RegisterTool adds a tool to the toolbox.
 func (tb *Toolbox) RegisterTool(tool Tool) error {
 	if tool.Name == "" {
 		return errors.New("tool name cannot be empty")
@@ -35,6 +38,7 @@ func (tb *Toolbox) RegisterTool(tool Tool) error {
 	return nil
 }
 
+// ChatTools returns provider-neutral tool definitions for chat requests.
 func (tb *Toolbox) ChatTools() []ChatTool {
 	tools := make([]ChatTool, 0, len(tb.tools))
 	for _, tool := range tb.tools {
@@ -47,6 +51,7 @@ func (tb *Toolbox) ChatTools() []ChatTool {
 	return tools
 }
 
+// Call executes a registered tool with a JSON argument payload.
 func (tb *Toolbox) Call(ctx context.Context, name string, arguments string) (*string, error) {
 	tool, ok := tb.tools[name]
 	if !ok {
@@ -60,8 +65,12 @@ func (tb *Toolbox) Call(ctx context.Context, name string, arguments string) (*st
 	return tool.Call(ctx, args)
 }
 
+// ChatTool is the provider-neutral schema exposed to chat clients.
 type ChatTool struct {
-	Name        string
+	// Name is the function name exposed to the model.
+	Name string
+	// Description explains what the tool does.
 	Description string
-	Parameters  map[string]any
+	// Parameters is the JSON schema for the tool input.
+	Parameters map[string]any
 }

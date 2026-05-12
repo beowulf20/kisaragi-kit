@@ -14,17 +14,23 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
+// ClientConfig configures an OpenAI-compatible chat client.
 type ClientConfig struct {
+	// BaseURL is the OpenAI-compatible API base URL.
 	BaseURL string
-	APIKey  string
+	// APIKey is the credential sent to the API.
+	APIKey string
+	// Timeout limits individual API requests when greater than zero.
 	Timeout time.Duration
 }
 
+// Client adapts OpenAI-compatible chat completion APIs to llm.ChatClient.
 type Client struct {
 	config ClientConfig
 	client openaisdk.Client
 }
 
+// NewClient validates config and returns a configured OpenAI-compatible client.
 func NewClient(config ClientConfig) (*Client, ClientConfig, error) {
 	config.BaseURL = strings.TrimRight(config.BaseURL, "/")
 	if config.BaseURL == "" {
@@ -48,6 +54,7 @@ func NewClient(config ClientConfig) (*Client, ClientConfig, error) {
 	}, config, nil
 }
 
+// Complete sends a streaming chat completion request and returns the final result.
 func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks llm.CompletionHooks) (*llm.ChatResponse, error) {
 	if c == nil {
 		return nil, errors.New("openai client is nil")
@@ -98,6 +105,7 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 	return response, nil
 }
 
+// ListModels returns available model IDs from the OpenAI-compatible API.
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	if c == nil {
 		return nil, errors.New("openai client is nil")

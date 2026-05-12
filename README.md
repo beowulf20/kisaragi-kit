@@ -81,6 +81,11 @@ func main() {
 			Client: client,
 			Model:  "gpt-4o-mini",
 			Tools:  *tools,
+			// Optional safety limits; zero values use package defaults.
+			MaxToolCallRounds: llm.DefaultMaxToolCallRounds,
+			MaxToolErrorLength: llm.DefaultMaxToolErrorLength,
+			// Optional provider retry limit; nil uses package default.
+			ProviderErrorRetries: nil,
 		},
 		Hooks: agent.Hooks{
 			OnContentDelta: func(delta string) { fmt.Print(delta) },
@@ -134,6 +139,16 @@ tool := llmtool.NewTool("lookup", "Looks up a record.", func(ctx context.Context
 
 Input structs become provider-neutral JSON schemas. Public fields are included, `json:"-"` fields are ignored, pointer fields and `omitempty` fields are optional, and `description` tags become schema descriptions.
 
+Tool errors are sent back to the model as tool result messages, so the next turn can repair bad arguments or choose another path. Override the feedback with `ToolErrorInterceptor`:
+
+```go
+ToolErrorInterceptor: func(ctx llm.ToolErrorContext) llm.ToolErrorDecision {
+	return llm.ToolErrorDecision{
+		Feedback: `{"error":"missing city","retryable":true,"hint":"Call weather with a city."}`,
+	}
+},
+```
+
 ### Agents
 
 Agents wrap completion config plus message history:
@@ -181,6 +196,8 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 ## Design Notes
 
 - The framework core is provider-neutral; the OpenAI adapter targets OpenAI-compatible chat completion APIs.
-- Tool execution is capped at eight rounds to prevent infinite loops.
-- Tool errors are returned to the model as short JSON error payloads.
+- Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
+- Tool errors are returned to the model as JSON error payloads capped by `CompletionCallInput.MaxToolErrorLength`.
+- Tool error feedback can be rewritten or aborted by `CompletionCallInput.ToolErrorInterceptor`.
+- Provider completion errors are retried by `CompletionCallInput.ProviderErrorRetries`; nil uses `DefaultProviderErrorRetries`.
 - The public API stays small: client setup, messages, completions, tools, and agents.
