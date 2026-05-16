@@ -37,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: ${{ github.event_name == 'push' }}
+    env:
+      RELEASE_BRANCH: release-please--branches--master
     steps:
       - name: Check release token
         env:
@@ -59,12 +61,51 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Clean stale release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          open_release_prs="$(gh pr list --state open --json number,headRefName \
+            --jq '[.[] | select(.headRefName == env.RELEASE_BRANCH)] | length')"
+
+          if [ "$open_release_prs" != "0" ]; then
+            echo "Open release PR exists for $RELEASE_BRANCH; keeping branch."
+            exit 0
+          fi
+
+          ref_path="/repos/${GITHUB_REPOSITORY}/git/refs/heads/${RELEASE_BRANCH}"
+          if gh api "$ref_path" >/dev/null 2>&1; then
+            echo "Deleting stale release branch $RELEASE_BRANCH."
+            gh api -X DELETE "$ref_path"
+          else
+            echo "No stale release branch found."
+          fi
+
       - name: Release Please
         id: release
         uses: googleapis/release-please-action@v4
         with:
           release-type: go
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Clean release artifacts after failure
+        if: ${{ failure() && steps.release.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          gh pr list --state open --json number,headRefName \
+            --jq '.[] | select(.headRefName == env.RELEASE_BRANCH) | .number' |
+          while read -r pr_number; do
+            if [ -n "$pr_number" ]; then
+              gh pr close "$pr_number" --delete-branch \
+                --comment "Closing stale release-please PR after release workflow failure."
+            fi
+          done
+
+          ref_path="/repos/${GITHUB_REPOSITORY}/git/refs/heads/${RELEASE_BRANCH}"
+          if gh api "$ref_path" >/dev/null 2>&1; then
+            gh api -X DELETE "$ref_path"
+          fi
 
       - name: Fetch release tag
         if: ${{ steps.release.outputs.release_created }}
@@ -83,6 +124,8 @@ jobs:
   auto-merge-release-pr:
     runs-on: ubuntu-latest
     needs: test
+    env:
+      RELEASE_BRANCH: release-please--branches--master
     if: >-
       ${{
         github.event_name == 'pull_request' &&
@@ -95,5 +138,13 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          gh pr merge "$PR_NUMBER" --auto --merge --delete-branch \
-            || gh pr merge "$PR_NUMBER" --merge --delete-branch
+          gh pr merge "$PR_NUMBER" --merge --delete-branch
+
+      - name: Delete release branch if still present
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          ref_path="/repos/${GITHUB_REPOSITORY}/git/refs/heads/${RELEASE_BRANCH}"
+          if gh api "$ref_path" >/dev/null 2>&1; then
+            gh api -X DELETE "$ref_path"
+          fi
