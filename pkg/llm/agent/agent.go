@@ -36,6 +36,12 @@ type NewAgentInput struct {
 type Hooks struct {
 	// OnContentDelta receives streamed assistant text chunks.
 	OnContentDelta func(string)
+	// OnGenerationStart runs before one provider generation attempt starts.
+	OnGenerationStart func(llm.GenerationStartEvent)
+	// OnGenerationEnd runs after one provider generation attempt ends.
+	OnGenerationEnd func(llm.GenerationEndEvent)
+	// OnUsage runs after a provider generation reports token usage.
+	OnUsage func(llm.UsageEvent)
 	// OnCallError runs after a provider chat call fails.
 	OnCallError func(error)
 	// OnToolCall runs before a requested tool is executed.
@@ -116,13 +122,7 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 		return nil, err
 	}
 
-	input.Hooks = llm.CompletionHooks{
-		OnContentDelta: a.Hooks.OnContentDelta,
-		OnCallError:    a.Hooks.OnCallError,
-		OnToolCall:     a.Hooks.OnToolCall,
-		OnToolError:    a.Hooks.OnToolError,
-		OnToolResult:   a.Hooks.OnToolResult,
-	}
+	input.Hooks = llm.ChainCompletionHooks(input.Hooks, a.Hooks.completionHooks())
 
 	output, err := llm.Completion(input)
 	if err != nil {
@@ -135,4 +135,17 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 		a.Messages = append(a.Messages, llm.NewAssistantMessage(output.Content))
 	}
 	return output, nil
+}
+
+func (hooks Hooks) completionHooks() llm.CompletionHooks {
+	return llm.CompletionHooks{
+		OnContentDelta:    hooks.OnContentDelta,
+		OnGenerationStart: hooks.OnGenerationStart,
+		OnGenerationEnd:   hooks.OnGenerationEnd,
+		OnUsage:           hooks.OnUsage,
+		OnCallError:       hooks.OnCallError,
+		OnToolCall:        hooks.OnToolCall,
+		OnToolError:       hooks.OnToolError,
+		OnToolResult:      hooks.OnToolResult,
+	}
 }

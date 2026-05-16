@@ -34,6 +34,8 @@ type ChatResponse struct {
 	Content string
 	// ToolCalls contains function tool calls requested by the assistant.
 	ToolCalls []ToolCall
+	// Usage contains token usage reported by the provider when available.
+	Usage *TokenUsage
 }
 
 // ResolveModel returns model when set, or asks the client for its first model.

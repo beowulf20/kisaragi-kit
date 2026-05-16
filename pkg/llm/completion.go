@@ -85,6 +85,10 @@ type CompletionCallOutput struct {
 	ToolCalls []ToolCall
 	// Messages contains assistant and tool messages produced by the call.
 	Messages []Message
+	// Usage aggregates token usage reported by provider generations.
+	Usage TokenUsage
+	// UsageEvents records token usage reported by each provider generation.
+	UsageEvents []UsageEvent
 }
 
 const (
@@ -120,13 +124,14 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			Temperature: input.Temperature,
 			Tools:       tools,
 		}
-		response, err := completeWithProviderRetries(ctx, input.Client, request, input.Hooks, providerErrorRetries)
+		response, attempt, err := completeWithProviderRetries(ctx, input.Client, request, input.Hooks, providerErrorRetries, round)
 		if err != nil {
 			return nil, fmt.Errorf("chat completion failed: %w", err)
 		}
 		if response == nil {
 			return nil, errors.New("chat completion returned nil response")
 		}
+		output.recordUsage(input.Hooks, request.Model, round, attempt, response.Usage)
 
 		if len(response.ToolCalls) == 0 {
 			output.Content = response.Content
@@ -234,17 +239,69 @@ func (input CompletionCallInput) effectiveProviderErrorRetries() int {
 	return DefaultProviderErrorRetries
 }
 
-func completeWithProviderRetries(ctx context.Context, client ChatClient, request ChatRequest, hooks CompletionHooks, retries int) (*ChatResponse, error) {
+func (output *CompletionCallOutput) recordUsage(hooks CompletionHooks, model string, round int, attempt int, usage *TokenUsage) {
+	if usage == nil {
+		return
+	}
+	event := UsageEvent{
+		Model:   model,
+		Round:   round,
+		Attempt: attempt,
+		Usage:   usage.clone(),
+	}
+	hooks.EmitUsage(event)
+	output.Usage.add(event.Usage)
+	output.UsageEvents = append(output.UsageEvents, event)
+}
+
+func completeWithProviderRetries(ctx context.Context, client ChatClient, request ChatRequest, hooks CompletionHooks, retries int, round int) (*ChatResponse, int, error) {
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
+		start := GenerationStartEvent{
+			Model:              request.Model,
+			Round:              round,
+			Attempt:            attempt,
+			MessageCount:       len(request.Messages),
+			AvailableToolCount: len(request.Tools),
+		}
+		hooks.EmitGenerationStart(start)
+
 		response, err := client.Complete(ctx, request, hooks)
 		if err == nil {
-			return response, nil
+			end := GenerationEndEvent{
+				Model:              request.Model,
+				Round:              round,
+				Attempt:            attempt,
+				MessageCount:       len(request.Messages),
+				AvailableToolCount: len(request.Tools),
+				Usage:              responseUsage(response),
+			}
+			if response != nil {
+				end.ToolCallCount = len(response.ToolCalls)
+			}
+			hooks.EmitGenerationEnd(end)
+			return response, attempt, nil
 		}
+		hooks.EmitGenerationEnd(GenerationEndEvent{
+			Model:              request.Model,
+			Round:              round,
+			Attempt:            attempt,
+			MessageCount:       len(request.Messages),
+			AvailableToolCount: len(request.Tools),
+			Err:                err,
+		})
 		hooks.EmitCallError(err)
 		lastErr = err
 	}
-	return nil, lastErr
+	return nil, retries, lastErr
+}
+
+func responseUsage(response *ChatResponse) *TokenUsage {
+	if response == nil || response.Usage == nil {
+		return nil
+	}
+	usage := response.Usage.clone()
+	return &usage
 }
 
 func shortToolError(err error, maxLength int) string {

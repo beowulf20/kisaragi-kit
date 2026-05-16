@@ -240,6 +240,59 @@ func TestAgentForwardsCallErrorHook(t *testing.T) {
 	}
 }
 
+func TestAgentChainsConfigAndAgentHooks(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*llm.ChatResponse{{
+			Content: "done",
+			Usage: &llm.TokenUsage{
+				PromptTokens:     1,
+				CompletionTokens: 2,
+				TotalTokens:      3,
+			},
+		}},
+	}
+
+	var calls []string
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("system prompt")},
+			Hooks: llm.CompletionHooks{
+				OnGenerationStart: func(llm.GenerationStartEvent) {
+					calls = append(calls, "config-start")
+				},
+				OnUsage: func(llm.UsageEvent) {
+					calls = append(calls, "config-usage")
+				},
+			},
+		},
+		Hooks: Hooks{
+			OnGenerationStart: func(llm.GenerationStartEvent) {
+				calls = append(calls, "agent-start")
+			},
+			OnUsage: func(llm.UsageEvent) {
+				calls = append(calls, "agent-usage")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := agent.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Usage.TotalTokens != 3 {
+		t.Fatalf("usage = %#v, want total 3", output.Usage)
+	}
+	if strings.Join(calls, ",") != "config-start,agent-start,config-usage,agent-usage" {
+		t.Fatalf("calls = %v, want config then agent hooks", calls)
+	}
+}
+
 func TestAsToolUsesAgentMetadataAndQueryInput(t *testing.T) {
 	agent, err := NewAgent(NewAgentInput{
 		Name:        "Smart Home",
