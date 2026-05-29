@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.3.0...v1.4.0) (2026-05-29)
+
+
+### Features
+
+* add tool approval hooks ([80eb02d](https://github.com/beowulf20/kisaragi-kit/commit/80eb02dd7370da9e8faeca177685570bfff004f1))
+
 ## [1.3.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.2.0...v1.3.0) (2026-05-16)
 
 
