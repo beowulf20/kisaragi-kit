@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +248,192 @@ func TestToolboxCallReturnsNilResultOnError(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatalf("result = %q, want nil", *result)
+	}
+}
+
+func TestToolboxCallRequiresApprovalBeforeHandlerRuns(t *testing.T) {
+	type input struct {
+		Name string `json:"name"`
+	}
+	type output struct {
+		Greeting string `json:"greeting"`
+	}
+
+	called := false
+	toolbox := NewToolbox(WithApprovalHook(func(_ context.Context, request ApprovalRequest) (ApprovalDecision, error) {
+		if request.ToolName != "greet" {
+			t.Fatalf("tool name = %q, want greet", request.ToolName)
+		}
+		if string(request.Arguments) != `{"name":"Ada"}` {
+			t.Fatalf("arguments = %s, want Ada payload", string(request.Arguments))
+		}
+		return ApprovalDecision{Approved: false, Reason: "operator said no"}, nil
+	}))
+	err := toolbox.RegisterTool(NewTool("greet", "Greets a person.", func(_ context.Context, input input) (output, error) {
+		called = true
+		return output{Greeting: "hello " + input.Name}, nil
+	}, WithApproval(ApprovalPolicy{
+		Mode: ApprovalAlways,
+		Risk: RiskMedium,
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := toolbox.Call(context.Background(), "greet", `{"name":"Ada"}`)
+	if !errors.Is(err, ErrApprovalDenied) {
+		t.Fatalf("err = %v, want ErrApprovalDenied", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %q, want nil", *result)
+	}
+	if called {
+		t.Fatal("handler ran before approval")
+	}
+}
+
+func TestToolboxCallRunsWhenApproved(t *testing.T) {
+	type input struct {
+		Name string `json:"name"`
+	}
+	type output struct {
+		Greeting string `json:"greeting"`
+	}
+
+	toolbox := NewToolbox(WithApprovalHook(func(context.Context, ApprovalRequest) (ApprovalDecision, error) {
+		return ApprovalDecision{Approved: true}, nil
+	}))
+	err := toolbox.RegisterTool(NewTool("greet", "Greets a person.", func(_ context.Context, input input) (output, error) {
+		return output{Greeting: "hello " + input.Name}, nil
+	}, WithApproval(ApprovalPolicy{
+		Mode: ApprovalAlways,
+		Risk: RiskMedium,
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := toolbox.Call(context.Background(), "greet", `{"name":"Ada"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+
+	var decoded output
+	if err := json.Unmarshal([]byte(*result), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Greeting != "hello Ada" {
+		t.Fatalf("greeting = %q, want hello Ada", decoded.Greeting)
+	}
+}
+
+func TestToolboxCallWithInfoReturnsApprovalRecord(t *testing.T) {
+	type input struct {
+		Name string `json:"name"`
+	}
+	type output struct {
+		Greeting string `json:"greeting"`
+	}
+
+	toolbox := NewToolbox(WithApprovalHook(func(context.Context, ApprovalRequest) (ApprovalDecision, error) {
+		return ApprovalDecision{Approved: true, Reason: "approved by test"}, nil
+	}))
+	err := toolbox.RegisterTool(NewTool("greet", "Greets a person.", func(_ context.Context, input input) (output, error) {
+		return output{Greeting: "hello " + input.Name}, nil
+	}, WithApproval(ApprovalPolicy{
+		Mode: ApprovalAlways,
+		Risk: RiskMedium,
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := toolbox.CallWithInfo(context.Background(), "greet", `{"name":"Ada"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Approval == nil {
+		t.Fatal("approval record is nil")
+	}
+	if !result.Approval.Approved || result.Approval.Reason != "approved by test" {
+		t.Fatalf("approval = %#v, want approved record", result.Approval)
+	}
+	if result.Result == nil {
+		t.Fatal("result is nil")
+	}
+}
+
+func TestToolboxCallErrorsWhenApprovalHookMissing(t *testing.T) {
+	type input struct{}
+	type output struct{}
+
+	toolbox := NewToolbox()
+	err := toolbox.RegisterTool(NewTool("risky", "Needs approval.", func(context.Context, input) (output, error) {
+		return output{}, nil
+	}, WithApproval(ApprovalPolicy{
+		Mode: ApprovalAlways,
+		Risk: RiskHigh,
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = toolbox.Call(context.Background(), "risky", `{}`)
+	if !errors.Is(err, ErrApprovalDenied) {
+		t.Fatalf("err = %v, want ErrApprovalDenied", err)
+	}
+}
+
+func TestApprovalOnRiskSkipsLowRisk(t *testing.T) {
+	type input struct{}
+	type output struct{}
+
+	approvalCalled := false
+	toolbox := NewToolbox(WithApprovalHook(func(context.Context, ApprovalRequest) (ApprovalDecision, error) {
+		approvalCalled = true
+		return ApprovalDecision{}, nil
+	}))
+	err := toolbox.RegisterTool(NewTool("safe", "Low risk.", func(context.Context, input) (output, error) {
+		return output{}, nil
+	}, WithApproval(ApprovalPolicy{
+		Mode: ApprovalOnRisk,
+		Risk: RiskLow,
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := toolbox.Call(context.Background(), "safe", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if approvalCalled {
+		t.Fatal("approval hook called for low-risk tool")
+	}
+}
+
+func TestStdioApprovalHookApprovesYes(t *testing.T) {
+	var out strings.Builder
+	hook := NewStdioApprovalHook(strings.NewReader("yes\n"), &out)
+
+	decision, err := hook(context.Background(), ApprovalRequest{
+		ToolName:  "weather",
+		Arguments: json.RawMessage(`{"city":"Curitiba"}`),
+		Policy: ApprovalPolicy{
+			Risk:        RiskMedium,
+			Preview:     PreviewPayload,
+			Description: "Get current weather.",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Approved {
+		t.Fatal("decision should approve yes")
+	}
+	if !strings.Contains(out.String(), "Tool approval required") {
+		t.Fatalf("prompt = %q, want approval text", out.String())
 	}
 }

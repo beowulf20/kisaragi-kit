@@ -113,6 +113,12 @@ For OpenAI-compatible local servers:
 OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=local OPENAI_MODEL=llama3.1 go run ./examples/basic
 ```
 
+Run the human-approval example:
+
+```bash
+OPENAI_API_KEY=... go run ./examples/approval
+```
+
 ## Core Concepts
 
 ### Messages
@@ -148,6 +154,23 @@ ToolErrorInterceptor: func(ctx llm.ToolErrorContext) llm.ToolErrorDecision {
 	}
 },
 ```
+
+Tool approval is declared on the tool and enforced by the toolbox before the Go handler runs:
+
+```go
+toolbox := llmtool.NewToolbox(llmtool.WithApprovalHook(llmtool.NewStdioApprovalHook(os.Stdin, os.Stdout)))
+tool := llmtool.NewTool("delete_record", "Deletes a record.", deleteRecord, llmtool.WithApproval(llmtool.ApprovalPolicy{
+	Mode:        llmtool.ApprovalAlways,
+	Risk:        llmtool.RiskHigh,
+	Preview:     llmtool.PreviewPayload,
+	Description: "Delete one record by ID.",
+}))
+_ = toolbox.RegisterTool(tool)
+```
+
+Custom approval hooks can show diffs, command previews, UI prompts, or audit-log entries. If a tool requires approval and no hook is installed, the call fails with `ErrApprovalDenied`.
+
+Agents persist approval decisions when `CompletionCallInput.ApprovalDecisionMessages` enables accepted or rejected transcript messages.
 
 ### Agents
 
@@ -186,6 +209,7 @@ This lets a coordinator agent call specialist agents using the same tool loop.
 - `OnToolCall` before a tool runs
 - `OnToolError` after a tool returns an error or invalid result
 - `OnToolResult` after a tool returns or fails
+- `llmtool.ApprovalHook` before approved tool execution
 
 ## Tests
 
@@ -199,6 +223,8 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 
 - The framework core is provider-neutral; the OpenAI adapter targets OpenAI-compatible chat completion APIs.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
+- Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.
+- Approval accept/reject transcript messages are opt-in through `CompletionCallInput.ApprovalDecisionMessages`.
 - Tool errors are returned to the model as JSON error payloads capped by `CompletionCallInput.MaxToolErrorLength`.
 - Tool error feedback can be rewritten or aborted by `CompletionCallInput.ToolErrorInterceptor`.
 - Provider completion errors are retried by `CompletionCallInput.ProviderErrorRetries`; nil uses `DefaultProviderErrorRetries`.

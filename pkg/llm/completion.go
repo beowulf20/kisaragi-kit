@@ -26,6 +26,8 @@ type CompletionCallInput struct {
 	Hooks CompletionHooks
 	// ToolErrorInterceptor can rewrite tool error feedback or abort on tool failure.
 	ToolErrorInterceptor ToolErrorInterceptor
+	// ApprovalDecisionMessages controls whether human approval decisions are added to output messages.
+	ApprovalDecisionMessages ApprovalDecisionMessages
 	// MaxToolCallRounds caps consecutive tool-call turns. Zero uses DefaultMaxToolCallRounds.
 	MaxToolCallRounds int
 	// MaxToolErrorLength caps tool error text sent back to the model. Zero uses DefaultMaxToolErrorLength.
@@ -55,6 +57,14 @@ type ToolErrorDecision struct {
 	Feedback string
 	// Abort stops the completion immediately and returns the tool error.
 	Abort bool
+}
+
+// ApprovalDecisionMessages controls which approval decisions are persisted in transcripts.
+type ApprovalDecisionMessages struct {
+	// AppendAccepted adds accepted approval decisions to CompletionCallOutput.Messages.
+	AppendAccepted bool
+	// AppendRejected adds rejected approval decisions to CompletionCallOutput.Messages.
+	AppendRejected bool
 }
 
 // Validate checks that required completion input fields are present.
@@ -157,7 +167,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			}
 			input.Hooks.EmitToolCall(call)
 
-			result, err := input.Tools.Call(ctx, toolCall.Name, toolCall.Arguments)
+			callOutput, err := input.Tools.CallWithInfo(ctx, toolCall.Name, toolCall.Arguments)
 			if err != nil {
 				input.Hooks.EmitToolError(call, err)
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
@@ -169,9 +179,10 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				output.ToolCalls = append(output.ToolCalls, call)
 				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
 				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
+				input.appendApprovalDecisionMessage(output, callOutput.Approval)
 				continue
 			}
-			if result == nil {
+			if callOutput.Result == nil {
 				err := fmt.Errorf("tool %q returned nil result", toolCall.Name)
 				input.Hooks.EmitToolError(call, err)
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
@@ -183,18 +194,52 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				output.ToolCalls = append(output.ToolCalls, call)
 				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
 				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
+				input.appendApprovalDecisionMessage(output, callOutput.Approval)
 				continue
 			}
 
-			call.Result = *result
+			call.Result = *callOutput.Result
 			input.Hooks.EmitToolResult(call)
 			output.ToolCalls = append(output.ToolCalls, call)
-			output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, *result))
-			messages = append(messages, NewToolMessage(toolCall.ID, *result))
+			output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, *callOutput.Result))
+			messages = append(messages, NewToolMessage(toolCall.ID, *callOutput.Result))
+			input.appendApprovalDecisionMessage(output, callOutput.Approval)
 		}
 	}
 
 	return nil, fmt.Errorf("exceeded %d tool call rounds", maxToolCallRounds)
+}
+
+func (input CompletionCallInput) appendApprovalDecisionMessage(output *CompletionCallOutput, approval *llmtool.ApprovalRecord) {
+	if output == nil || approval == nil {
+		return
+	}
+	if approval.Approved && !input.ApprovalDecisionMessages.AppendAccepted {
+		return
+	}
+	if !approval.Approved && !input.ApprovalDecisionMessages.AppendRejected {
+		return
+	}
+
+	status := "rejected"
+	if approval.Approved {
+		status = "accepted"
+	}
+
+	message := map[string]string{
+		"tool_approval": status,
+		"tool":          approval.ToolName,
+		"risk":          string(approval.Policy.Risk),
+	}
+	if approval.Reason != "" {
+		message["reason"] = approval.Reason
+	}
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		return
+	}
+	output.Messages = append(output.Messages, NewUserMessage(string(data)))
 }
 
 func (input CompletionCallInput) interceptToolError(toolCall ToolCall, err error, round int, maxToolErrorLength int) (string, bool) {

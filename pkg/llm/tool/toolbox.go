@@ -9,14 +9,29 @@ import (
 
 // Toolbox stores registered tools and calls them by name.
 type Toolbox struct {
-	tools map[string]Tool
+	tools        map[string]Tool
+	approvalHook ApprovalHook
+}
+
+// ToolboxOption customizes a toolbox.
+type ToolboxOption func(*Toolbox)
+
+// WithApprovalHook installs a hook that can approve or deny tool calls.
+func WithApprovalHook(hook ApprovalHook) ToolboxOption {
+	return func(tb *Toolbox) {
+		tb.approvalHook = hook
+	}
 }
 
 // NewToolbox returns an empty toolbox.
-func NewToolbox() *Toolbox {
-	return &Toolbox{
+func NewToolbox(options ...ToolboxOption) *Toolbox {
+	tb := &Toolbox{
 		tools: make(map[string]Tool),
 	}
+	for _, option := range options {
+		option(tb)
+	}
+	return tb
 }
 
 // RegisterTool adds a tool to the toolbox.
@@ -53,16 +68,33 @@ func (tb *Toolbox) ChatTools() []ChatTool {
 
 // Call executes a registered tool with a JSON argument payload.
 func (tb *Toolbox) Call(ctx context.Context, name string, arguments string) (*string, error) {
+	output, err := tb.CallWithInfo(ctx, name, arguments)
+	return output.Result, err
+}
+
+// CallOutput contains a tool result plus runtime metadata.
+type CallOutput struct {
+	Result   *string
+	Approval *ApprovalRecord
+}
+
+// CallWithInfo executes a registered tool and returns runtime metadata.
+func (tb *Toolbox) CallWithInfo(ctx context.Context, name string, arguments string) (CallOutput, error) {
 	tool, ok := tb.tools[name]
 	if !ok {
-		return nil, fmt.Errorf("tool %q is not registered", name)
+		return CallOutput{}, fmt.Errorf("tool %q is not registered", name)
 	}
 
 	args := json.RawMessage(arguments)
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	return tool.Call(ctx, args)
+	approval, err := approveToolCall(ctx, tb.approvalHook, tool, args)
+	if err != nil {
+		return CallOutput{Approval: approval}, err
+	}
+	result, err := tool.Call(ctx, args)
+	return CallOutput{Result: result, Approval: approval}, err
 }
 
 // ChatTool is the provider-neutral schema exposed to chat clients.

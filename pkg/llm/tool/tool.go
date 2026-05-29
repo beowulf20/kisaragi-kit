@@ -14,13 +14,25 @@ type Tool struct {
 	Description string
 	// Parameters is the JSON schema for the tool input.
 	Parameters map[string]any
+	// Approval declares whether this tool needs human approval before execution.
+	Approval ApprovalPolicy
 	// Call decodes raw JSON arguments and returns a JSON result.
 	Call func(context.Context, json.RawMessage) (*string, error)
 }
 
+// ToolOption customizes a tool created by NewTool.
+type ToolOption func(*Tool)
+
+// WithApproval attaches an approval policy to a tool.
+func WithApproval(policy ApprovalPolicy) ToolOption {
+	return func(tool *Tool) {
+		tool.Approval = policy
+	}
+}
+
 // NewTool wraps a typed Go function as a Tool with inferred input schema.
-func NewTool[I, O any](name string, description string, call func(context.Context, I) (O, error)) Tool {
-	return Tool{
+func NewTool[I, O any](name string, description string, call func(context.Context, I) (O, error), options ...ToolOption) Tool {
+	tool := Tool{
 		Name:        name,
 		Description: description,
 		Parameters:  JSONSchemaFor[I](),
@@ -43,4 +55,8 @@ func NewTool[I, O any](name string, description string, call func(context.Contex
 			return &result, nil
 		},
 	}
+	for _, option := range options {
+		option(&tool)
+	}
+	return tool
 }

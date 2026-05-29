@@ -143,6 +143,110 @@ func TestCompletionRunsToolLoop(t *testing.T) {
 	}
 }
 
+func TestCompletionCanAppendAcceptedApprovalDecisionMessages(t *testing.T) {
+	tools := llmtool.NewToolbox(llmtool.WithApprovalHook(func(context.Context, llmtool.ApprovalRequest) (llmtool.ApprovalDecision, error) {
+		return llmtool.ApprovalDecision{Approved: true, Reason: "looks safe"}, nil
+	}))
+	if err := tools.RegisterTool(llmtool.NewTool("greet", "Greets a person.", func(_ context.Context, input struct {
+		Name string `json:"name"`
+	}) (struct {
+		Greeting string `json:"greeting"`
+	}, error) {
+		return struct {
+			Greeting string `json:"greeting"`
+		}{Greeting: "hello " + input.Name}, nil
+	}, llmtool.WithApproval(llmtool.ApprovalPolicy{
+		Mode: llmtool.ApprovalAlways,
+		Risk: llmtool.RiskMedium,
+	}))); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{
+				ToolCalls: []ToolCall{
+					{ID: "call_123", Name: "greet", Arguments: `{"name":"Ada"}`},
+				},
+			},
+			{Content: "done"},
+		},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("say hello")},
+		Tools:    *tools,
+		ApprovalDecisionMessages: ApprovalDecisionMessages{
+			AppendAccepted: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(output.Messages) != 4 {
+		t.Fatalf("output messages = %d, want 4", len(output.Messages))
+	}
+	approvalMessage := output.Messages[2]
+	if approvalMessage.Type != User || !strings.Contains(approvalMessage.Content, `"tool_approval":"accepted"`) || !strings.Contains(approvalMessage.Content, `"reason":"looks safe"`) {
+		t.Fatalf("approval message = %#v, want accepted user transcript", approvalMessage)
+	}
+	if len(client.requests[1].Messages) != 3 {
+		t.Fatalf("second request messages = %d, want approval omitted from current provider loop", len(client.requests[1].Messages))
+	}
+}
+
+func TestCompletionCanAppendRejectedApprovalDecisionMessages(t *testing.T) {
+	tools := llmtool.NewToolbox(llmtool.WithApprovalHook(func(context.Context, llmtool.ApprovalRequest) (llmtool.ApprovalDecision, error) {
+		return llmtool.ApprovalDecision{Approved: false, Reason: "too risky"}, nil
+	}))
+	if err := tools.RegisterTool(llmtool.NewTool("greet", "Greets a person.", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	}, llmtool.WithApproval(llmtool.ApprovalPolicy{
+		Mode: llmtool.ApprovalAlways,
+		Risk: llmtool.RiskHigh,
+	}))); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{
+				ToolCalls: []ToolCall{
+					{ID: "call_123", Name: "greet", Arguments: `{}`},
+				},
+			},
+			{Content: "done"},
+		},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("say hello")},
+		Tools:    *tools,
+		ApprovalDecisionMessages: ApprovalDecisionMessages{
+			AppendRejected: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(output.Messages) != 4 {
+		t.Fatalf("output messages = %d, want 4", len(output.Messages))
+	}
+	approvalMessage := output.Messages[2]
+	if approvalMessage.Type != User || !strings.Contains(approvalMessage.Content, `"tool_approval":"rejected"`) || !strings.Contains(approvalMessage.Content, `"reason":"too risky"`) {
+		t.Fatalf("approval message = %#v, want rejected user transcript", approvalMessage)
+	}
+	if len(client.requests[1].Messages) != 3 {
+		t.Fatalf("second request messages = %d, want approval omitted from current provider loop", len(client.requests[1].Messages))
+	}
+}
+
 func TestCompletionEmitsGenerationLifecycleForProviderRetries(t *testing.T) {
 	client := &fakeChatClient{
 		errors:    []error{errors.New("temporary")},
