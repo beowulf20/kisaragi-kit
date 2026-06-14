@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.5.0...v1.6.0) (2026-06-14)
+
+
+### Features
+
+* **llm:** add typed reasoning effort setting ([463d901](https://github.com/beowulf20/kisaragi-kit/commit/463d9014bc4634679d8c42f95073f22b0db2b8c6))
+
 ## [1.5.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.4.0...v1.5.0) (2026-06-14)
 
 
