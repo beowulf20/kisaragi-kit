@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.4.0...v1.5.0) (2026-06-14)
+
+
+### Features
+
+* **llm:** add caller context support ([fa16c9d](https://github.com/beowulf20/kisaragi-kit/commit/fa16c9ddda2add5c1750a79ed2c0e8dfc6cb816b))
+
+
+### Bug Fixes
+
+* **llm:** stabilize tools and usage reporting ([61e6900](https://github.com/beowulf20/kisaragi-kit/commit/61e69002c0dc3ffb6b946dc6f4daa6a2993d117e))
+
 ## [1.4.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.3.0...v1.4.0) (2026-05-29)
 
 
