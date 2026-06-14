@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestJSONSchemaForEmptyInput(t *testing.T) {
@@ -123,6 +124,140 @@ func TestJSONSchemaForNilPointerInputIsEmptySchema(t *testing.T) {
 	}
 	if additional := schema["additionalProperties"]; additional != false {
 		t.Fatalf("additionalProperties = %v, want false", additional)
+	}
+}
+
+func TestJSONSchemaForScalarInputWrapsValue(t *testing.T) {
+	schema := JSONSchemaFor[string]()
+
+	if schema["type"] != "object" {
+		t.Fatalf("type = %v, want object", schema["type"])
+	}
+	if additional := schema["additionalProperties"]; additional != false {
+		t.Fatalf("additionalProperties = %v, want false", additional)
+	}
+
+	properties := schema["properties"].(map[string]any)
+	value := properties["value"].(map[string]any)
+	if value["type"] != "string" {
+		t.Fatalf("value.type = %v, want string", value["type"])
+	}
+
+	required := schema["required"].([]string)
+	if len(required) != 1 || required[0] != "value" {
+		t.Fatalf("required = %v, want [value]", required)
+	}
+}
+
+func TestJSONSchemaForNestedCollectionsAndMaps(t *testing.T) {
+	type address struct {
+		City string `json:"city"`
+	}
+	type input struct {
+		Addresses []address          `json:"addresses"`
+		Scores    map[string]float64 `json:"scores"`
+		Tags      [2]string          `json:"tags,omitempty"`
+		Any       map[int]string     `json:"any,omitempty"`
+	}
+
+	schema := JSONSchemaFor[input]()
+	properties := schema["properties"].(map[string]any)
+
+	addresses := properties["addresses"].(map[string]any)
+	if addresses["type"] != "array" {
+		t.Fatalf("addresses.type = %v, want array", addresses["type"])
+	}
+	addressItems := addresses["items"].(map[string]any)
+	addressProps := addressItems["properties"].(map[string]any)
+	city := addressProps["city"].(map[string]any)
+	if addressItems["type"] != "object" || city["type"] != "string" {
+		t.Fatalf("address items = %#v, want object with string city", addressItems)
+	}
+
+	scores := properties["scores"].(map[string]any)
+	scoreValues := scores["additionalProperties"].(map[string]any)
+	if scores["type"] != "object" || scoreValues["type"] != "number" {
+		t.Fatalf("scores schema = %#v, want object with number additionalProperties", scores)
+	}
+
+	tags := properties["tags"].(map[string]any)
+	tagItems := tags["items"].(map[string]any)
+	if tags["type"] != "array" || tagItems["type"] != "string" {
+		t.Fatalf("tags schema = %#v, want array of strings", tags)
+	}
+
+	any := properties["any"].(map[string]any)
+	if _, ok := any["additionalProperties"]; ok {
+		t.Fatalf("non-string-key map schema = %#v, want no additionalProperties schema", any)
+	}
+}
+
+func TestJSONSchemaForTimeAndOmitZero(t *testing.T) {
+	type input struct {
+		When     time.Time  `json:"when"`
+		Optional int        `json:"optional,omitzero"`
+		Maybe    *time.Time `json:"maybe"`
+	}
+
+	schema := JSONSchemaFor[input]()
+	properties := schema["properties"].(map[string]any)
+
+	when := properties["when"].(map[string]any)
+	if when["type"] != "string" || when["format"] != "date-time" {
+		t.Fatalf("when schema = %#v, want date-time string", when)
+	}
+	maybe := properties["maybe"].(map[string]any)
+	if maybe["type"] != "string" || maybe["format"] != "date-time" {
+		t.Fatalf("maybe schema = %#v, want date-time string", maybe)
+	}
+
+	required := schema["required"].([]string)
+	if len(required) != 1 || required[0] != "when" {
+		t.Fatalf("required = %v, want only [when]", required)
+	}
+}
+
+func TestJSONSchemaForSkippedFieldsAndDefaultNames(t *testing.T) {
+	type embedded struct {
+		Embedded string `json:"embedded"`
+	}
+	type input struct {
+		embedded
+		DefaultName string `json:",omitempty"`
+		hidden      string `json:"hidden"`
+		Visible     bool
+		Skipped     string `json:"-"`
+		Ignored     func() `json:"ignored,omitempty"`
+	}
+
+	schema := JSONSchemaFor[input]()
+	properties := schema["properties"].(map[string]any)
+
+	if _, ok := properties["embedded"]; ok {
+		t.Fatal("anonymous embedded field should not appear in schema")
+	}
+	if _, ok := properties["hidden"]; ok {
+		t.Fatal("unexported field should not appear in schema")
+	}
+	if _, ok := properties["Skipped"]; ok {
+		t.Fatal("json:\"-\" field should not appear in schema")
+	}
+	defaultName := properties["DefaultName"].(map[string]any)
+	if defaultName["type"] != "string" {
+		t.Fatalf("DefaultName schema = %#v, want string", defaultName)
+	}
+	visible := properties["Visible"].(map[string]any)
+	if visible["type"] != "boolean" {
+		t.Fatalf("Visible schema = %#v, want boolean", visible)
+	}
+	ignored := properties["ignored"].(map[string]any)
+	if ignored["type"] != "object" {
+		t.Fatalf("unsupported function schema = %#v, want object fallback", ignored)
+	}
+
+	required := schema["required"].([]string)
+	if len(required) != 1 || required[0] != "Visible" {
+		t.Fatalf("required = %v, want only [Visible]", required)
 	}
 }
 
