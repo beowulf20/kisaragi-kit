@@ -22,8 +22,8 @@ func (a *Agent) AsTool() llmtool.Tool {
 		description = "Calls the " + a.Name + " agent."
 	}
 
-	return llmtool.NewTool("agent_"+toolName(a.Name), description, func(_ context.Context, input agentToolInput) (agentToolOutput, error) {
-		output, err := a.CallWithUserMessage(input.Query)
+	return llmtool.NewTool("agent_"+toolName(a.Name), description, func(ctx context.Context, input agentToolInput) (agentToolOutput, error) {
+		output, err := a.CallWithUserMessageContext(ctx, input.Query)
 		if err != nil {
 			return agentToolOutput{}, err
 		}

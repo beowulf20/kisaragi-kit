@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
@@ -345,13 +346,99 @@ func TestAsToolRejectsEmptyQuery(t *testing.T) {
 	}
 }
 
+func TestAsToolPassesCallContextToAgentCompletion(t *testing.T) {
+	type contextKey string
+	key := contextKey("request-id")
+	ctx := context.WithValue(context.Background(), key, "req-123")
+	client := &fakeChatClient{
+		responses: []*llm.ChatResponse{{Content: "done"}},
+	}
+
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("test")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := agent.AsTool()
+	result, err := tool.Call(ctx, []byte(`{"query":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || !strings.Contains(*result, `"response":"done"`) {
+		t.Fatalf("result = %v, want delegated response", result)
+	}
+	if len(client.contexts) != 1 || client.contexts[0].Value(key) != "req-123" {
+		t.Fatalf("contexts = %#v, want delegated caller context", client.contexts)
+	}
+}
+
+func TestAgentConcurrentPublicMethods(t *testing.T) {
+	client := &fakeChatClient{}
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("test")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent.AddMessage(llm.NewUserMessage("manual"))
+			_ = agent.MessagesSnapshot()
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := agent.CallWithUserMessage("hello"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := agent.RunWithTransientMessage(llm.NewUserMessage("transient")); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(agent.MessagesSnapshot()) == 0 {
+		t.Fatal("messages snapshot is empty")
+	}
+}
+
 type fakeChatClient struct {
+	mu        sync.Mutex
 	responses []*llm.ChatResponse
 	errors    []error
 	requests  []llm.ChatRequest
+	contexts  []context.Context
 }
 
-func (c *fakeChatClient) Complete(_ context.Context, request llm.ChatRequest, _ llm.CompletionHooks) (*llm.ChatResponse, error) {
+func (c *fakeChatClient) Complete(ctx context.Context, request llm.ChatRequest, _ llm.CompletionHooks) (*llm.ChatResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.contexts = append(c.contexts, ctx)
 	c.requests = append(c.requests, request)
 	if len(c.errors) > 0 {
 		err := c.errors[0]

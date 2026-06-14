@@ -50,6 +50,48 @@ func TestCompletionStreamsContentDeltas(t *testing.T) {
 	}
 }
 
+func TestCompletionUsesCallerContext(t *testing.T) {
+	type contextKey string
+	key := contextKey("request-id")
+	ctx := context.WithValue(context.Background(), key, "req-123")
+
+	tools := llmtool.NewToolbox()
+	if err := tools.RegisterTool(llmtool.NewTool("check_context", "Checks context.", func(ctx context.Context, _ struct{}) (struct {
+		RequestID string `json:"request_id"`
+	}, error) {
+		value, _ := ctx.Value(key).(string)
+		return struct {
+			RequestID string `json:"request_id"`
+		}{RequestID: value}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{ToolCalls: []ToolCall{{ID: "call_1", Name: "check_context", Arguments: `{}`}}},
+			{Content: "done"},
+		},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Context:  ctx,
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("check context")},
+		Tools:    *tools,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.contexts) != 2 || client.contexts[0].Value(key) != "req-123" || client.contexts[1].Value(key) != "req-123" {
+		t.Fatalf("provider contexts = %#v, want caller context", client.contexts)
+	}
+	if len(output.ToolCalls) != 1 || !strings.Contains(output.ToolCalls[0].Result, `"request_id":"req-123"`) {
+		t.Fatalf("tool calls = %#v, want caller context in result", output.ToolCalls)
+	}
+}
+
 func TestCompletionEmitsGenerationLifecycle(t *testing.T) {
 	client := &fakeChatClient{
 		responses: []*ChatResponse{{Content: "done"}},
@@ -723,11 +765,13 @@ type fakeChatClient struct {
 	responses  []*ChatResponse
 	errors     []error
 	requests   []ChatRequest
+	contexts   []context.Context
 	models     []string
 	onComplete func(ChatRequest, CompletionHooks)
 }
 
-func (c *fakeChatClient) Complete(_ context.Context, request ChatRequest, hooks CompletionHooks) (*ChatResponse, error) {
+func (c *fakeChatClient) Complete(ctx context.Context, request ChatRequest, hooks CompletionHooks) (*ChatResponse, error) {
+	c.contexts = append(c.contexts, ctx)
 	c.requests = append(c.requests, request)
 	if c.onComplete != nil {
 		c.onComplete(request, hooks)

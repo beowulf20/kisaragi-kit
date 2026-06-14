@@ -12,6 +12,8 @@ import (
 
 // CompletionCallInput configures a complete LLM call, including tools and hooks.
 type CompletionCallInput struct {
+	// Context controls provider requests and tool execution. Nil uses context.Background().
+	Context context.Context
 	// Client sends provider-specific chat completion requests.
 	Client ChatClient
 	// Model is the provider model ID to use.
@@ -119,7 +121,10 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 		return nil, errors.New("client cannot be nil")
 	}
 
-	ctx := context.Background()
+	ctx := input.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	messages := append([]Message(nil), input.Messages...)
 	output := &CompletionCallOutput{}
 	tools := input.Tools.ChatTools()

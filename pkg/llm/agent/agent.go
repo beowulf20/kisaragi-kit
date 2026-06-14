@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
 )
@@ -16,6 +18,9 @@ type Agent struct {
 	// Hooks receives streaming content and tool execution events.
 	Hooks Hooks
 	llm.CompletionCallInput
+
+	mu    sync.Mutex
+	runMu sync.Mutex
 }
 
 // NewAgentInput configures a new Agent.
@@ -78,43 +83,120 @@ func NewAgent(input NewAgentInput) (*Agent, error) {
 
 // AddMessage appends a message to the agent's persistent history.
 func (a *Agent) AddMessage(message llm.Message) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.Messages = append(a.Messages, message)
 }
 
 // MessagesSnapshot returns a copy of the agent's persistent history.
 func (a *Agent) MessagesSnapshot() []llm.Message {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return append([]llm.Message(nil), a.Messages...)
 }
 
 // CallWithUserMessage appends a user message and runs the agent.
 func (a *Agent) CallWithUserMessage(content string) (*llm.CompletionCallOutput, error) {
+	return a.callWithUserMessage(content, context.Background(), false)
+}
+
+// CallWithUserMessageContext appends a user message and runs the agent with ctx.
+func (a *Agent) CallWithUserMessageContext(ctx context.Context, content string) (*llm.CompletionCallOutput, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.callWithUserMessage(content, ctx, true)
+}
+
+func (a *Agent) callWithUserMessage(content string, ctx context.Context, overrideContext bool) (*llm.CompletionCallOutput, error) {
+	if a == nil {
+		return nil, errors.New("agent is nil")
+	}
 	if strings.TrimSpace(content) == "" {
 		return nil, errors.New("user message cannot be empty")
 	}
-	a.AddMessage(llm.NewUserMessage(content))
-	return a.call()
+
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
+	a.mu.Lock()
+	a.Messages = append(a.Messages, llm.NewUserMessage(content))
+	input := a.completionInputLocked(a.Messages)
+	if overrideContext {
+		input.Context = ctx
+	}
+	a.mu.Unlock()
+
+	return a.complete(input)
 }
 
 // Run continues the agent from its current persistent history.
 func (a *Agent) Run() (*llm.CompletionCallOutput, error) {
-	return a.call()
+	return a.run(context.Background(), false)
+}
+
+// RunContext continues the agent from its current persistent history with ctx.
+func (a *Agent) RunContext(ctx context.Context) (*llm.CompletionCallOutput, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.run(ctx, true)
+}
+
+func (a *Agent) run(ctx context.Context, overrideContext bool) (*llm.CompletionCallOutput, error) {
+	if a == nil {
+		return nil, errors.New("agent is nil")
+	}
+
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
+	a.mu.Lock()
+	input := a.completionInputLocked(a.Messages)
+	if overrideContext {
+		input.Context = ctx
+	}
+	a.mu.Unlock()
+
+	return a.complete(input)
 }
 
 // RunWithTransientMessage runs the agent with an extra message that is not stored.
 func (a *Agent) RunWithTransientMessage(message llm.Message) (*llm.CompletionCallOutput, error) {
-	if a == nil {
-		return nil, errors.New("agent is nil")
-	}
-	input := a.CompletionCallInput
-	input.Messages = append(append([]llm.Message(nil), a.Messages...), message)
-	return a.complete(input)
+	return a.runWithTransientMessage(message, context.Background(), false)
 }
 
-func (a *Agent) call() (*llm.CompletionCallOutput, error) {
+// RunWithTransientMessageContext runs the agent with an extra message and ctx.
+func (a *Agent) RunWithTransientMessageContext(ctx context.Context, message llm.Message) (*llm.CompletionCallOutput, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.runWithTransientMessage(message, ctx, true)
+}
+
+func (a *Agent) runWithTransientMessage(message llm.Message, ctx context.Context, overrideContext bool) (*llm.CompletionCallOutput, error) {
 	if a == nil {
 		return nil, errors.New("agent is nil")
 	}
-	return a.complete(a.CompletionCallInput)
+
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
+	a.mu.Lock()
+	messages := append(append([]llm.Message(nil), a.Messages...), message)
+	input := a.completionInputLocked(messages)
+	if overrideContext {
+		input.Context = ctx
+	}
+	a.mu.Unlock()
+
+	return a.complete(input)
 }
 
 func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutput, error) {
@@ -129,12 +211,20 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 		return nil, err
 	}
 
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if len(output.Messages) > 0 {
 		a.Messages = append(a.Messages, output.Messages...)
 	} else if strings.TrimSpace(output.Content) != "" {
 		a.Messages = append(a.Messages, llm.NewAssistantMessage(output.Content))
 	}
 	return output, nil
+}
+
+func (a *Agent) completionInputLocked(messages []llm.Message) llm.CompletionCallInput {
+	input := a.CompletionCallInput
+	input.Messages = append([]llm.Message(nil), messages...)
+	return input
 }
 
 func (hooks Hooks) completionHooks() llm.CompletionHooks {
