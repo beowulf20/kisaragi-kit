@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // Toolbox stores registered tools and calls them by name.
@@ -56,7 +57,14 @@ func (tb *Toolbox) RegisterTool(tool Tool) error {
 // ChatTools returns provider-neutral tool definitions for chat requests.
 func (tb *Toolbox) ChatTools() []ChatTool {
 	tools := make([]ChatTool, 0, len(tb.tools))
-	for _, tool := range tb.tools {
+	names := make([]string, 0, len(tb.tools))
+	for name := range tb.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		tool := tb.tools[name]
 		tools = append(tools, ChatTool{
 			Name:        tool.Name,
 			Description: tool.Description,

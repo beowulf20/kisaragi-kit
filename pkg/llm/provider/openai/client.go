@@ -73,6 +73,9 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 		Model:       openaisdk.ChatModel(request.Model),
 		Messages:    messages,
 		Temperature: openaisdk.Float(request.Temperature),
+		StreamOptions: openaisdk.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openaisdk.Bool(true),
+		},
 	}
 	tools := openAIChatTools(request.Tools)
 	if len(tools) > 0 {
@@ -91,6 +94,7 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 	message := completion.Choices[0].Message
 	response := &llm.ChatResponse{
 		Content: message.Content,
+		Usage:   completionUsage(completion.Usage),
 	}
 	for _, toolCall := range message.ToolCalls {
 		if toolCall.Type != "function" {
@@ -103,6 +107,42 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 		})
 	}
 	return response, nil
+}
+
+func completionUsage(usage openaisdk.CompletionUsage) *llm.TokenUsage {
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		return nil
+	}
+
+	result := &llm.TokenUsage{
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+	}
+	result.PromptTokenDetails = tokenDetails(map[string]int64{
+		"audio_tokens":  usage.PromptTokensDetails.AudioTokens,
+		"cached_tokens": usage.PromptTokensDetails.CachedTokens,
+	})
+	result.CompletionTokenDetails = tokenDetails(map[string]int64{
+		"accepted_prediction_tokens": usage.CompletionTokensDetails.AcceptedPredictionTokens,
+		"audio_tokens":               usage.CompletionTokensDetails.AudioTokens,
+		"reasoning_tokens":           usage.CompletionTokensDetails.ReasoningTokens,
+		"rejected_prediction_tokens": usage.CompletionTokensDetails.RejectedPredictionTokens,
+	})
+	return result
+}
+
+func tokenDetails(values map[string]int64) map[string]int64 {
+	details := make(map[string]int64)
+	for key, value := range values {
+		if value != 0 {
+			details[key] = value
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
 }
 
 // ListModels returns available model IDs from the OpenAI-compatible API.

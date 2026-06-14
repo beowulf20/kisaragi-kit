@@ -195,6 +195,28 @@ func TestToolboxCallUsesTypedInput(t *testing.T) {
 	}
 }
 
+func TestToolboxChatToolsAreSortedByName(t *testing.T) {
+	toolbox := NewToolbox()
+	for _, name := range []string{"zeta", "alpha", "middle"} {
+		err := toolbox.RegisterTool(NewTool(name, "Tool "+name+".", func(context.Context, struct{}) (struct{}, error) {
+			return struct{}{}, nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tools := toolbox.ChatTools()
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+
+	if strings.Join(names, ",") != "alpha,middle,zeta" {
+		t.Fatalf("tool names = %v, want sorted order", names)
+	}
+}
+
 func TestToolboxCallLeavesMissingPointerInputNil(t *testing.T) {
 	type input struct {
 		Name     string  `json:"name"`
