@@ -24,6 +24,8 @@ type ChatRequest struct {
 	Messages []Message
 	// Temperature controls response randomness.
 	Temperature float64
+	// ReasoningEffort constrains reasoning for models/providers that support it.
+	ReasoningEffort ReasoningEffort
 	// Tools lists function tools the model may call.
 	Tools []llmtool.ChatTool
 }

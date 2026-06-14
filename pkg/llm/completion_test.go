@@ -50,6 +50,31 @@ func TestCompletionStreamsContentDeltas(t *testing.T) {
 	}
 }
 
+func TestCompletionForwardsReasoningEffort(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*ChatResponse{{Content: "done"}},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Client:          client,
+		Model:           "test-model",
+		Messages:        []Message{NewUserMessage("think lightly")},
+		ReasoningEffort: ReasoningEffortLow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	if client.requests[0].ReasoningEffort != ReasoningEffortLow {
+		t.Fatalf("reasoning effort = %q, want %q", client.requests[0].ReasoningEffort, ReasoningEffortLow)
+	}
+}
+
 func TestCompletionUsesCallerContext(t *testing.T) {
 	type contextKey string
 	key := contextKey("request-id")
@@ -746,6 +771,18 @@ func TestCompletionRejectsNegativeLimits(t *testing.T) {
 	input.ProviderErrorRetries = &retries
 	if err := input.Validate(); err == nil || !strings.Contains(err.Error(), "provider error retries") {
 		t.Fatalf("expected provider error retries error, got %v", err)
+	}
+}
+
+func TestCompletionRejectsInvalidReasoningEffort(t *testing.T) {
+	input := CompletionCallInput{
+		Model:           "test-model",
+		Messages:        []Message{NewUserMessage("hello")},
+		ReasoningEffort: ReasoningEffort("extra-crunchy"),
+	}
+
+	if err := input.Validate(); err == nil || !strings.Contains(err.Error(), "reasoning effort") {
+		t.Fatalf("expected reasoning effort error, got %v", err)
 	}
 }
 

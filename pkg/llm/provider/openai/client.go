@@ -77,6 +77,9 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 			IncludeUsage: openaisdk.Bool(true),
 		},
 	}
+	if request.ReasoningEffort != "" {
+		params.ReasoningEffort = shared.ReasoningEffort(request.ReasoningEffort)
+	}
 	tools := openAIChatTools(request.Tools)
 	if len(tools) > 0 {
 		params.Tools = tools

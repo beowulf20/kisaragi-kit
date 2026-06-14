@@ -81,6 +81,8 @@ func main() {
 			Client: client,
 			Model:  "gpt-4o-mini",
 			Tools:  *tools,
+			// Optional for reasoning models that support API-level effort control.
+			ReasoningEffort: llm.ReasoningEffortLow,
 			// Optional safety limits; zero values use package defaults.
 			MaxToolCallRounds: llm.DefaultMaxToolCallRounds,
 			MaxToolErrorLength: llm.DefaultMaxToolErrorLength,
@@ -108,6 +110,7 @@ Run the included example:
 
 ```bash
 OPENAI_API_KEY=... go run ./examples/basic
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.1 OPENAI_REASONING_EFFORT=low go run ./examples/basic
 ```
 
 For OpenAI-compatible local servers:
@@ -120,6 +123,7 @@ Run the human-approval example:
 
 ```bash
 OPENAI_API_KEY=... go run ./examples/approval
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.1 OPENAI_REASONING_EFFORT=low go run ./examples/approval
 ```
 
 ## Core Concepts
@@ -230,6 +234,7 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 ## Design Notes
 
 - The framework core is provider-neutral; the OpenAI adapter targets OpenAI-compatible chat completion APIs.
+- Reasoning effort can be set with `CompletionCallInput.ReasoningEffort` for models/providers that support it.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
 - Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.
 - Approval accept/reject transcript messages are opt-in through `CompletionCallInput.ApprovalDecisionMessages`.

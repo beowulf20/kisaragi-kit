@@ -79,7 +79,8 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 
 	var deltas []string
 	output, err := client.Complete(t.Context(), llm.ChatRequest{
-		Model: "test-model",
+		Model:           "test-model",
+		ReasoningEffort: llm.ReasoningEffortLow,
 		Messages: []llm.Message{
 			llm.NewUserMessage("say hello"),
 		},
@@ -117,5 +118,8 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	}
 	if !strings.Contains(requestBody, `"stream_options"`) || !strings.Contains(requestBody, `"include_usage":true`) {
 		t.Fatalf("request missing include_usage stream option:\n%s", requestBody)
+	}
+	if !strings.Contains(requestBody, `"reasoning_effort":"low"`) {
+		t.Fatalf("request missing reasoning effort:\n%s", requestBody)
 	}
 }

@@ -22,6 +22,8 @@ type CompletionCallInput struct {
 	Messages []Message
 	// Temperature controls response randomness.
 	Temperature float64
+	// ReasoningEffort constrains reasoning for models/providers that support it.
+	ReasoningEffort ReasoningEffort
 	// Tools contains typed tools available to the model.
 	Tools llmtool.Toolbox
 	// Hooks receives streaming content and tool execution events.
@@ -86,6 +88,9 @@ func (input CompletionCallInput) Validate() error {
 	if input.ProviderErrorRetries != nil && *input.ProviderErrorRetries < 0 {
 		return errors.New("provider error retries cannot be negative")
 	}
+	if !input.ReasoningEffort.valid() {
+		return fmt.Errorf("reasoning effort must be one of none, minimal, low, medium, high, xhigh")
+	}
 	return nil
 }
 
@@ -134,10 +139,11 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 
 	for round := 0; round <= maxToolCallRounds; round++ {
 		request := ChatRequest{
-			Model:       input.Model,
-			Messages:    messages,
-			Temperature: input.Temperature,
-			Tools:       tools,
+			Model:           input.Model,
+			Messages:        messages,
+			Temperature:     input.Temperature,
+			ReasoningEffort: input.ReasoningEffort,
+			Tools:           tools,
 		}
 		response, attempt, err := completeWithProviderRetries(ctx, input.Client, request, input.Hooks, providerErrorRetries, round)
 		if err != nil {

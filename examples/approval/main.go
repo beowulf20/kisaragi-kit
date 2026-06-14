@@ -51,13 +51,18 @@ func main() {
 	}
 
 	model := getenv("OPENAI_MODEL", "gpt-4o-mini")
+	reasoningEffort, err := getenvReasoningEffort("OPENAI_REASONING_EFFORT")
+	if err != nil {
+		log.Fatal(err)
+	}
 	assistant, err := agent.NewAgent(agent.NewAgentInput{
 		Name:         "approval-demo",
 		SystemPrompt: "Save the requested note using tools. Keep the final response brief.",
 		Config: llm.CompletionCallInput{
-			Client: client,
-			Model:  model,
-			Tools:  *tools,
+			Client:          client,
+			Model:           model,
+			ReasoningEffort: reasoningEffort,
+			Tools:           *tools,
 			ApprovalDecisionMessages: llm.ApprovalDecisionMessages{
 				AppendAccepted: true,
 				AppendRejected: true,
@@ -116,4 +121,25 @@ func getenv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getenvReasoningEffort(key string) (llm.ReasoningEffort, error) {
+	switch value := os.Getenv(key); value {
+	case "":
+		return "", nil
+	case string(llm.ReasoningEffortNone):
+		return llm.ReasoningEffortNone, nil
+	case string(llm.ReasoningEffortMinimal):
+		return llm.ReasoningEffortMinimal, nil
+	case string(llm.ReasoningEffortLow):
+		return llm.ReasoningEffortLow, nil
+	case string(llm.ReasoningEffortMedium):
+		return llm.ReasoningEffortMedium, nil
+	case string(llm.ReasoningEffortHigh):
+		return llm.ReasoningEffortHigh, nil
+	case string(llm.ReasoningEffortXHigh):
+		return llm.ReasoningEffortXHigh, nil
+	default:
+		return "", fmt.Errorf("%s must be one of none, minimal, low, medium, high, xhigh", key)
+	}
 }
