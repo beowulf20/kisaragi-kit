@@ -230,6 +230,7 @@ func TestJSONSchemaForSkippedFieldsAndDefaultNames(t *testing.T) {
 		Ignored     func() `json:"ignored,omitempty"`
 	}
 
+	_ = input{hidden: "not exported"}.hidden
 	schema := JSONSchemaFor[input]()
 	properties := schema["properties"].(map[string]any)
 
