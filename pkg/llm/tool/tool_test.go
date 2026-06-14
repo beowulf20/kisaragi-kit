@@ -224,7 +224,7 @@ func TestJSONSchemaForSkippedFieldsAndDefaultNames(t *testing.T) {
 	type input struct {
 		embedded
 		DefaultName string `json:",omitempty"`
-		hidden      string `json:"hidden"`
+		hidden      string
 		Visible     bool
 		Skipped     string `json:"-"`
 		Ignored     func() `json:"ignored,omitempty"`
