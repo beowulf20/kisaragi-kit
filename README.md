@@ -95,7 +95,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := assistant.CallWithUserMessage("What is the weather in Curitiba?"); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := assistant.CallWithUserMessageContext(ctx, "What is the weather in Curitiba?"); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -143,7 +146,7 @@ tool := llmtool.NewTool("lookup", "Looks up a record.", func(ctx context.Context
 })
 ```
 
-Input structs become provider-neutral JSON schemas. Public fields are included, `json:"-"` fields are ignored, pointer fields and `omitempty` fields are optional, and `description` tags become schema descriptions.
+Input structs become provider-neutral JSON schemas. Public fields are included, `json:"-"` fields are ignored, pointer fields and `omitempty` fields are optional, and `description` tags become schema descriptions. The generator intentionally covers common Go shapes only: scalars, structs, slices, arrays, maps, pointers, and `time.Time`. It does not infer enums, ranges, regex patterns, min/max length, or recursive schemas.
 
 Tool errors are sent back to the model as tool result messages, so the next turn can repair bad arguments or choose another path. Override the feedback with `ToolErrorInterceptor`:
 
@@ -187,7 +190,9 @@ assistant, err := agent.NewAgent(agent.NewAgentInput{
 })
 ```
 
-Use `CallWithUserMessage` for normal conversation, `Run` to continue from existing state, and `RunWithTransientMessage` when extra context should be sent once without being stored.
+Use `CallWithUserMessage` for normal conversation, `Run` to continue from existing state, and `RunWithTransientMessage` when extra context should be sent once without being stored. Use the `Context` variants (`CallWithUserMessageContext`, `RunContext`, `RunWithTransientMessageContext`) for cancellation, deadlines, and tracing.
+
+Agent methods serialize runs and protect persistent history for concurrent callers. Do not mutate exported agent fields such as `Messages`, `Hooks`, or embedded `CompletionCallInput` fields concurrently with a run.
 
 ### Agent Delegation
 
@@ -215,6 +220,9 @@ This lets a coordinator agent call specialist agents using the same tool loop.
 
 ```bash
 go test ./...
+go test -race ./...
+go vet ./...
+staticcheck ./...
 ```
 
 The test suite covers schema generation, typed tool calls, streaming content, tool-call messages, agent history, transient messages, and agent-as-tool behavior.
@@ -228,4 +236,9 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 - Tool errors are returned to the model as JSON error payloads capped by `CompletionCallInput.MaxToolErrorLength`.
 - Tool error feedback can be rewritten or aborted by `CompletionCallInput.ToolErrorInterceptor`.
 - Provider completion errors are retried by `CompletionCallInput.ProviderErrorRetries`; nil uses `DefaultProviderErrorRetries`.
+- Provider requests and tool calls use `CompletionCallInput.Context` when set; otherwise they use `context.Background()`.
 - The public API stays small: client setup, messages, completions, tools, and agents.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
