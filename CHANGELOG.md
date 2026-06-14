@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.6.0...v1.7.0) (2026-06-14)
+
+
+### Features
+
+* **openai:** allow chat completion extra fields ([b34dea0](https://github.com/beowulf20/kisaragi-kit/commit/b34dea0978a6937fc28fb28f07c32aad70c1d731))
+
 ## [1.6.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.5.0...v1.6.0) (2026-06-14)
 
 
