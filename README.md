@@ -235,6 +235,7 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 
 - The framework core is provider-neutral; the OpenAI adapter targets OpenAI-compatible chat completion APIs.
 - Reasoning effort can be set with `CompletionCallInput.ReasoningEffort` for models/providers that support it.
+- Provider-specific chat completion fields can be configured through `openai.ClientConfig.ChatCompletionExtraFields`.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
 - Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.
 - Approval accept/reject transcript messages are opt-in through `CompletionCallInput.ApprovalDecisionMessages`.

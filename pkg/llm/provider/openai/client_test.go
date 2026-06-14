@@ -72,6 +72,9 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	client, _, err := NewClient(ClientConfig{
 		BaseURL: server.URL,
 		APIKey:  "test-key",
+		ChatCompletionExtraFields: map[string]any{
+			"provider_option": map[string]string{"mode": "custom"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -121,5 +124,8 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	}
 	if !strings.Contains(requestBody, `"reasoning_effort":"low"`) {
 		t.Fatalf("request missing reasoning effort:\n%s", requestBody)
+	}
+	if !strings.Contains(requestBody, `"provider_option":{"mode":"custom"}`) {
+		t.Fatalf("request missing extra provider field:\n%s", requestBody)
 	}
 }

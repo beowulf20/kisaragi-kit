@@ -22,6 +22,8 @@ type ClientConfig struct {
 	APIKey string
 	// Timeout limits individual API requests when greater than zero.
 	Timeout time.Duration
+	// ChatCompletionExtraFields adds provider-specific JSON fields to every chat completion request.
+	ChatCompletionExtraFields map[string]any
 }
 
 // Client adapts OpenAI-compatible chat completion APIs to llm.ChatClient.
@@ -39,6 +41,7 @@ func NewClient(config ClientConfig) (*Client, ClientConfig, error) {
 	if config.APIKey == "" {
 		return nil, config, errors.New("API key cannot be empty")
 	}
+	config.ChatCompletionExtraFields = cloneExtraFields(config.ChatCompletionExtraFields)
 
 	options := []option.RequestOption{
 		option.WithBaseURL(config.BaseURL),
@@ -77,6 +80,9 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 			IncludeUsage: openaisdk.Bool(true),
 		},
 	}
+	if len(c.config.ChatCompletionExtraFields) > 0 {
+		params.SetExtraFields(cloneExtraFields(c.config.ChatCompletionExtraFields))
+	}
 	if request.ReasoningEffort != "" {
 		params.ReasoningEffort = shared.ReasoningEffort(request.ReasoningEffort)
 	}
@@ -110,6 +116,17 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 		})
 	}
 	return response, nil
+}
+
+func cloneExtraFields(fields map[string]any) map[string]any {
+	if len(fields) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(fields))
+	for key, value := range fields {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func completionUsage(usage openaisdk.CompletionUsage) *llm.TokenUsage {
