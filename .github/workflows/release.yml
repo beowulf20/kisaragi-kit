@@ -30,8 +30,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
       - name: Test
         run: go test ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Staticcheck
+        uses: dominikh/staticcheck-action@v1
 
   release:
     runs-on: ubuntu-latest
