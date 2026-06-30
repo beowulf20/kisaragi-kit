@@ -12,6 +12,7 @@ import (
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
+	"github.com/tidwall/gjson"
 )
 
 // ClientConfig configures an OpenAI-compatible chat client.
@@ -92,7 +93,7 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 		params.ToolChoice = openaisdk.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openaisdk.Opt("auto")}
 	}
 
-	completion, err := c.streamingChatCompletion(ctx, params, hooks)
+	completion, reasoning, err := c.streamingChatCompletion(ctx, params, hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +103,12 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 
 	message := completion.Choices[0].Message
 	response := &llm.ChatResponse{
-		Content: message.Content,
-		Usage:   completionUsage(completion.Usage),
+		Content:   message.Content,
+		Reasoning: reasoning,
+		Usage:     completionUsage(completion.Usage),
+	}
+	if response.Reasoning == "" {
+		response.Reasoning = reasoningTextFromCompletionRaw(completion.RawJSON())
 	}
 	for _, toolCall := range message.ToolCalls {
 		if toolCall.Type != "function" {
@@ -183,27 +188,75 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, error) {
+func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, string, error) {
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 	acc := openaisdk.ChatCompletionAccumulator{}
+	var reasoning strings.Builder
 
 	for stream.Next() {
 		chunk := stream.Current()
 		if !acc.AddChunk(chunk) {
-			return nil, errors.New("chat completion stream accumulation failed")
+			return nil, "", errors.New("chat completion stream accumulation failed")
+		}
+
+		for _, delta := range reasoningDeltasFromChunkRaw(chunk.RawJSON()) {
+			reasoning.WriteString(delta)
+			if err := hooks.EmitReasoningDelta(delta); err != nil {
+				return nil, "", err
+			}
+		}
+		if reasoning.Len() == 0 {
+			reasoning.WriteString(reasoningTextFromCompletionRaw(chunk.RawJSON()))
 		}
 
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
-				hooks.EmitContentDelta(choice.Delta.Content)
+				if err := hooks.EmitContentDeltaEvent(choice.Delta.Content); err != nil {
+					return nil, "", err
+				}
 			}
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return &acc.ChatCompletion, nil
+	return &acc.ChatCompletion, reasoning.String(), nil
+}
+
+func reasoningDeltasFromChunkRaw(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	choices := gjson.Get(raw, "choices").Array()
+	deltas := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		for _, path := range []string{"delta.reasoning", "delta.reasoning_content"} {
+			value := choice.Get(path)
+			if value.Exists() && value.Type == gjson.String && value.String() != "" {
+				deltas = append(deltas, value.String())
+				break
+			}
+		}
+	}
+	return deltas
+}
+
+func reasoningTextFromCompletionRaw(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var reasoning strings.Builder
+	for _, choice := range gjson.Get(raw, "choices").Array() {
+		for _, path := range []string{"message.reasoning", "message.reasoning_content"} {
+			value := choice.Get(path)
+			if value.Exists() && value.Type == gjson.String && value.String() != "" {
+				reasoning.WriteString(value.String())
+				break
+			}
+		}
+	}
+	return reasoning.String()
 }
 
 func openAIMessage(message llm.Message) (openaisdk.ChatCompletionMessageParamUnion, error) {

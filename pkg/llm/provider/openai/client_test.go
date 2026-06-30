@@ -129,3 +129,57 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 		t.Fatalf("request missing extra provider field:\n%s", requestBody)
 	}
 }
+
+func TestClientCompleteStreamsReasoningDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, data := range []string{
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"think "},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"reasoning_content":"carefully"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client, _, err := NewClient(ClientConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deltas []string
+	output, err := client.Complete(t.Context(), llm.ChatRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{llm.NewUserMessage("reason")},
+	}, llm.CompletionHooks{
+		OnReasoningDelta: func(delta string) {
+			deltas = append(deltas, delta)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if output.Reasoning != "think carefully" {
+		t.Fatalf("reasoning = %q, want think carefully", output.Reasoning)
+	}
+	if strings.Join(deltas, "") != "think carefully" {
+		t.Fatalf("reasoning deltas = %q, want think carefully", strings.Join(deltas, ""))
+	}
+}
+
+func TestReasoningTextFromCompletionRaw(t *testing.T) {
+	raw := `{"choices":[{"message":{"reasoning":"final "}},{"message":{"reasoning_content":"thought"}}]}`
+
+	if got := reasoningTextFromCompletionRaw(raw); got != "final thought" {
+		t.Fatalf("reasoning = %q, want final thought", got)
+	}
+}
