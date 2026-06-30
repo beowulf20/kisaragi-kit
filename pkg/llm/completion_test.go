@@ -50,6 +50,37 @@ func TestCompletionStreamsContentDeltas(t *testing.T) {
 	}
 }
 
+func TestCompletionStreamsReasoningDeltas(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*ChatResponse{{Content: "done", Reasoning: "think it through"}},
+		onComplete: func(_ ChatRequest, hooks CompletionHooks) {
+			hooks.EmitReasoningDelta("think ")
+			hooks.EmitReasoningDelta("it through")
+		},
+	}
+
+	var deltas []string
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("reason")},
+		Hooks: CompletionHooks{
+			OnReasoningDelta: func(delta string) {
+				deltas = append(deltas, delta)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if strings.Join(deltas, "") != "think it through" {
+		t.Fatalf("reasoning deltas = %q, want think it through", strings.Join(deltas, ""))
+	}
+}
+
 func TestCompletionForwardsReasoningEffort(t *testing.T) {
 	client := &fakeChatClient{
 		responses: []*ChatResponse{{Content: "done"}},
@@ -207,6 +238,72 @@ func TestCompletionRunsToolLoop(t *testing.T) {
 	}
 	if secondRequest.Messages[2].Type != Tool || !strings.Contains(secondRequest.Messages[2].Content, "hello Ada") {
 		t.Fatalf("tool result message = %#v", secondRequest.Messages[2])
+	}
+}
+
+func TestCompletionEmitsAssistantMessageBeforeToolExecution(t *testing.T) {
+	toolCalled := false
+	tools := llmtool.NewToolbox()
+	if err := tools.RegisterTool(llmtool.NewTool("mark_called", "Marks execution.", func(context.Context, struct{}) (struct {
+		OK bool `json:"ok"`
+	}, error) {
+		toolCalled = true
+		return struct {
+			OK bool `json:"ok"`
+		}{OK: true}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{
+				Content:   "calling",
+				Reasoning: "need tool",
+				ToolCalls: []ToolCall{{ID: "call_1", Name: "mark_called", Arguments: `{}`}},
+				Usage:     &TokenUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+			},
+			{Content: "done"},
+		},
+	}
+
+	var events []AssistantMessageEvent
+	var firstEventBeforeTool bool
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("call tool")},
+		Tools:    *tools,
+		Hooks: CompletionHooks{
+			OnAssistantMessage: func(event AssistantMessageEvent) {
+				if len(events) == 0 {
+					firstEventBeforeTool = !toolCalled
+				}
+				events = append(events, event)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if !firstEventBeforeTool {
+		t.Fatal("first assistant message event fired after tool execution")
+	}
+	if len(events) != 2 {
+		t.Fatalf("assistant events = %d, want 2", len(events))
+	}
+	first := events[0]
+	if first.Round != 0 || first.Attempt != 0 || first.Content != "calling" || first.Reasoning != "need tool" {
+		t.Fatalf("first assistant event = %#v", first)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].Name != "mark_called" {
+		t.Fatalf("assistant event tool calls = %#v", first.ToolCalls)
+	}
+	if first.Usage == nil || first.Usage.TotalTokens != 3 {
+		t.Fatalf("assistant event usage = %#v", first.Usage)
 	}
 }
 
@@ -518,6 +615,48 @@ func TestChainCompletionHooksCallsBothInOrder(t *testing.T) {
 	}
 }
 
+func TestChainCompletionHooksCallsNewHooksAndEventsInOrder(t *testing.T) {
+	var calls []string
+	hooks := ChainCompletionHooks(
+		CompletionHooks{
+			OnReasoningDelta: func(string) {
+				calls = append(calls, "first-reasoning")
+			},
+			OnAssistantMessage: func(AssistantMessageEvent) {
+				calls = append(calls, "first-assistant")
+			},
+			OnEvent: func(Event) error {
+				calls = append(calls, "first-event")
+				return nil
+			},
+		},
+		CompletionHooks{
+			OnReasoningDelta: func(string) {
+				calls = append(calls, "second-reasoning")
+			},
+			OnAssistantMessage: func(AssistantMessageEvent) {
+				calls = append(calls, "second-assistant")
+			},
+			OnEvent: func(Event) error {
+				calls = append(calls, "second-event")
+				return nil
+			},
+		},
+	)
+
+	if err := hooks.EmitReasoningDelta("think"); err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.EmitAssistantMessage(AssistantMessageEvent{Content: "done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "first-reasoning,second-reasoning,first-event,second-event,first-assistant,second-assistant,first-event,second-event"
+	if strings.Join(calls, ",") != want {
+		t.Fatalf("calls = %v, want %s", calls, want)
+	}
+}
+
 func TestCompletionRetriesProviderErrorsByDefault(t *testing.T) {
 	client := &fakeChatClient{
 		errors:    []error{errors.New("temporary one"), errors.New("temporary two")},
@@ -746,6 +885,87 @@ func TestCompletionToolErrorInterceptorCanAbort(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+}
+
+func TestCompletionAbortableLifecycleStopsBeforeToolExecution(t *testing.T) {
+	toolCalled := false
+	tools := llmtool.NewToolbox()
+	if err := tools.RegisterTool(llmtool.NewTool("dangerous", "Should not run.", func(context.Context, struct{}) (struct{}, error) {
+		toolCalled = true
+		return struct{}{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeChatClient{
+		responses: []*ChatResponse{
+			{ToolCalls: []ToolCall{{ID: "call_1", Name: "dangerous", Arguments: `{}`}}},
+			{Content: "unreachable"},
+		},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("call tool")},
+		Tools:    *tools,
+		Hooks: CompletionHooks{
+			OnEvent: func(event Event) error {
+				assistant, ok := event.(EventAssistantMessage)
+				if ok && len(assistant.ToolCalls) > 0 {
+					return errors.New("blocked assistant tool call")
+				}
+				return nil
+			},
+		},
+	})
+	if err == nil || !errors.Is(err, ErrCompletionEventAborted) || !strings.Contains(err.Error(), "blocked assistant tool call") {
+		t.Fatalf("expected lifecycle abort, got output=%#v err=%v", output, err)
+	}
+	if toolCalled {
+		t.Fatal("tool executed after assistant-message abort")
+	}
+	if output == nil {
+		t.Fatal("output is nil, want partial output")
+	}
+	if len(output.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %#v, want none executed", output.ToolCalls)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+}
+
+func TestCompletionAbortableLifecyclePreservesCompletedOutput(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*ChatResponse{{
+			Content: "partial done",
+			Usage:   &TokenUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+		}},
+	}
+
+	output, err := Completion(CompletionCallInput{
+		Client:   client,
+		Model:    "test-model",
+		Messages: []Message{NewUserMessage("hello")},
+		Hooks: CompletionHooks{
+			OnEvent: func(event Event) error {
+				if _, ok := event.(EventAssistantMessage); ok {
+					return errors.New("stop after response")
+				}
+				return nil
+			},
+		},
+	})
+	if err == nil || !errors.Is(err, ErrCompletionEventAborted) {
+		t.Fatalf("expected lifecycle abort, got %v", err)
+	}
+	if output == nil || output.Content != "partial done" {
+		t.Fatalf("output = %#v, want preserved content", output)
+	}
+	if output.Usage.TotalTokens != 3 || len(output.UsageEvents) != 1 {
+		t.Fatalf("usage = %#v events=%#v, want preserved usage", output.Usage, output.UsageEvents)
 	}
 }
 

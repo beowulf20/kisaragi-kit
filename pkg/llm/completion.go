@@ -147,12 +147,26 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 		}
 		response, attempt, err := completeWithProviderRetries(ctx, input.Client, request, input.Hooks, providerErrorRetries, round)
 		if err != nil {
+			if errors.Is(err, ErrCompletionEventAborted) {
+				if response != nil {
+					output.Content = response.Content
+					output.addUsage(request.Model, round, attempt, response.Usage)
+				}
+				return output, fmt.Errorf("chat completion aborted: %w", err)
+			}
 			return nil, fmt.Errorf("chat completion failed: %w", err)
 		}
 		if response == nil {
 			return nil, errors.New("chat completion returned nil response")
 		}
-		output.recordUsage(input.Hooks, request.Model, round, attempt, response.Usage)
+		if err := output.recordUsage(input.Hooks, request.Model, round, attempt, response.Usage); err != nil {
+			output.Content = response.Content
+			return output, fmt.Errorf("chat completion aborted: %w", err)
+		}
+		if err := input.Hooks.EmitAssistantMessage(assistantMessageEvent(round, attempt, response)); err != nil {
+			output.Content = response.Content
+			return output, fmt.Errorf("chat completion aborted: %w", err)
+		}
 
 		if len(response.ToolCalls) == 0 {
 			output.Content = response.Content
@@ -176,17 +190,23 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				Name:      toolCall.Name,
 				Arguments: toolCall.Arguments,
 			}
-			input.Hooks.EmitToolCall(call)
+			if err := input.Hooks.EmitToolCallEvent(round, call); err != nil {
+				return output, fmt.Errorf("chat completion aborted: %w", err)
+			}
 
 			callOutput, err := input.Tools.CallWithInfo(ctx, toolCall.Name, toolCall.Arguments)
 			if err != nil {
-				input.Hooks.EmitToolError(call, err)
+				if hookErr := input.Hooks.EmitToolErrorEvent(round, call, err); hookErr != nil {
+					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
+				}
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
 				if abort {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
 				}
 				call.Result = feedback
-				input.Hooks.EmitToolResult(call)
+				if hookErr := input.Hooks.EmitToolResultEvent(round, call); hookErr != nil {
+					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
+				}
 				output.ToolCalls = append(output.ToolCalls, call)
 				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
 				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
@@ -195,13 +215,17 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			}
 			if callOutput.Result == nil {
 				err := fmt.Errorf("tool %q returned nil result", toolCall.Name)
-				input.Hooks.EmitToolError(call, err)
+				if hookErr := input.Hooks.EmitToolErrorEvent(round, call, err); hookErr != nil {
+					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
+				}
 				feedback, abort := input.interceptToolError(call, err, round, maxToolErrorLength)
 				if abort {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
 				}
 				call.Result = feedback
-				input.Hooks.EmitToolResult(call)
+				if hookErr := input.Hooks.EmitToolResultEvent(round, call); hookErr != nil {
+					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
+				}
 				output.ToolCalls = append(output.ToolCalls, call)
 				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
 				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
@@ -210,7 +234,9 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			}
 
 			call.Result = *callOutput.Result
-			input.Hooks.EmitToolResult(call)
+			if err := input.Hooks.EmitToolResultEvent(round, call); err != nil {
+				return output, fmt.Errorf("chat completion aborted: %w", err)
+			}
 			output.ToolCalls = append(output.ToolCalls, call)
 			output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, *callOutput.Result))
 			messages = append(messages, NewToolMessage(toolCall.ID, *callOutput.Result))
@@ -295,9 +321,17 @@ func (input CompletionCallInput) effectiveProviderErrorRetries() int {
 	return DefaultProviderErrorRetries
 }
 
-func (output *CompletionCallOutput) recordUsage(hooks CompletionHooks, model string, round int, attempt int, usage *TokenUsage) {
+func (output *CompletionCallOutput) recordUsage(hooks CompletionHooks, model string, round int, attempt int, usage *TokenUsage) error {
+	event, ok := output.addUsage(model, round, attempt, usage)
+	if !ok {
+		return nil
+	}
+	return hooks.EmitUsageEvent(event)
+}
+
+func (output *CompletionCallOutput) addUsage(model string, round int, attempt int, usage *TokenUsage) (UsageEvent, bool) {
 	if usage == nil {
-		return
+		return UsageEvent{}, false
 	}
 	event := UsageEvent{
 		Model:   model,
@@ -305,9 +339,9 @@ func (output *CompletionCallOutput) recordUsage(hooks CompletionHooks, model str
 		Attempt: attempt,
 		Usage:   usage.clone(),
 	}
-	hooks.EmitUsage(event)
 	output.Usage.add(event.Usage)
 	output.UsageEvents = append(output.UsageEvents, event)
+	return event, true
 }
 
 func completeWithProviderRetries(ctx context.Context, client ChatClient, request ChatRequest, hooks CompletionHooks, retries int, round int) (*ChatResponse, int, error) {
@@ -320,7 +354,9 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			MessageCount:       len(request.Messages),
 			AvailableToolCount: len(request.Tools),
 		}
-		hooks.EmitGenerationStart(start)
+		if err := hooks.EmitGenerationStartEvent(start); err != nil {
+			return nil, attempt, err
+		}
 
 		response, err := client.Complete(ctx, request, hooks)
 		if err == nil {
@@ -335,10 +371,12 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			if response != nil {
 				end.ToolCallCount = len(response.ToolCalls)
 			}
-			hooks.EmitGenerationEnd(end)
+			if err := hooks.EmitGenerationEndEvent(end); err != nil {
+				return response, attempt, err
+			}
 			return response, attempt, nil
 		}
-		hooks.EmitGenerationEnd(GenerationEndEvent{
+		endErr := hooks.EmitGenerationEndEvent(GenerationEndEvent{
 			Model:              request.Model,
 			Round:              round,
 			Attempt:            attempt,
@@ -346,10 +384,34 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			AvailableToolCount: len(request.Tools),
 			Err:                err,
 		})
+		if endErr != nil {
+			return nil, attempt, endErr
+		}
+		if errors.Is(err, ErrCompletionEventAborted) {
+			return nil, attempt, err
+		}
 		hooks.EmitCallError(err)
 		lastErr = err
 	}
 	return nil, retries, lastErr
+}
+
+func assistantMessageEvent(round int, attempt int, response *ChatResponse) AssistantMessageEvent {
+	event := AssistantMessageEvent{
+		Round:   round,
+		Attempt: attempt,
+	}
+	if response == nil {
+		return event
+	}
+	event.Content = response.Content
+	event.Reasoning = response.Reasoning
+	event.ToolCalls = append([]ToolCall(nil), response.ToolCalls...)
+	if response.Usage != nil {
+		usage := response.Usage.clone()
+		event.Usage = &usage
+	}
+	return event
 }
 
 func responseUsage(response *ChatResponse) *TokenUsage {

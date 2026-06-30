@@ -34,6 +34,8 @@ type ChatRequest struct {
 type ChatResponse struct {
 	// Content is the assistant text content.
 	Content string
+	// Reasoning contains assistant reasoning text when reported by the provider.
+	Reasoning string
 	// ToolCalls contains function tool calls requested by the assistant.
 	ToolCalls []ToolCall
 	// Usage contains token usage reported by the provider when available.
