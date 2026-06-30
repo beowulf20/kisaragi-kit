@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.7.0...v1.8.0) (2026-06-30)
+
+
+### Features
+
+* **agent:** forward lifecycle hooks ([cf63592](https://github.com/beowulf20/kisaragi-kit/commit/cf635921d0aeedc001750c6560efcf5a3eb2f34c))
+* **llm:** add lifecycle event hooks ([168f0f2](https://github.com/beowulf20/kisaragi-kit/commit/168f0f25f0fcc363e3fb06ec19cdc85284345706))
+* **openai:** stream reasoning deltas ([a4c7be7](https://github.com/beowulf20/kisaragi-kit/commit/a4c7be7ed7d50ed3b22f077cefba796a430a4a11))
+
 ## [1.7.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.6.0...v1.7.0) (2026-06-14)
 
 
