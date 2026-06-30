@@ -120,11 +120,15 @@ jobs:
           fi
 
       - name: Fetch release tag
-        if: ${{ steps.release.outputs.release_created }}
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         run: git fetch --force --tags
 
+      - name: Checkout release tag
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        run: git checkout --detach "${{ steps.release.outputs.tag_name }}"
+
       - name: Run GoReleaser
-        if: ${{ steps.release.outputs.release_created }}
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
