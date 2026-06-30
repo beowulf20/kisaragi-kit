@@ -75,7 +75,7 @@ jobs:
 
       - name: Clean stale release artifacts
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           open_release_prs="$(gh pr list --state open --json number,headRefName \
             --jq '[.[] | select(.headRefName == env.RELEASE_BRANCH)] | length')"
@@ -103,7 +103,7 @@ jobs:
       - name: Clean release artifacts after failure
         if: ${{ failure() && steps.release.outcome == 'failure' }}
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr list --state open --json number,headRefName \
             --jq '.[] | select(.headRefName == env.RELEASE_BRANCH) | .number' |
