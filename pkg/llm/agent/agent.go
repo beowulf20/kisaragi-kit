@@ -41,6 +41,12 @@ type NewAgentInput struct {
 type Hooks struct {
 	// OnContentDelta receives streamed assistant text chunks.
 	OnContentDelta func(string)
+	// OnReasoningDelta receives streamed assistant reasoning chunks when a provider exposes them.
+	OnReasoningDelta func(string)
+	// OnAssistantMessage runs after one provider response is returned and before requested tools run.
+	OnAssistantMessage func(llm.AssistantMessageEvent)
+	// OnEvent receives typed lifecycle events and may abort the agent run by returning an error.
+	OnEvent func(llm.Event) error
 	// OnGenerationStart runs before one provider generation attempt starts.
 	OnGenerationStart func(llm.GenerationStartEvent)
 	// OnGenerationEnd runs after one provider generation attempt ends.
@@ -208,7 +214,7 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 
 	output, err := llm.Completion(input)
 	if err != nil {
-		return nil, err
+		return output, err
 	}
 
 	a.mu.Lock()
@@ -229,13 +235,16 @@ func (a *Agent) completionInputLocked(messages []llm.Message) llm.CompletionCall
 
 func (hooks Hooks) completionHooks() llm.CompletionHooks {
 	return llm.CompletionHooks{
-		OnContentDelta:    hooks.OnContentDelta,
-		OnGenerationStart: hooks.OnGenerationStart,
-		OnGenerationEnd:   hooks.OnGenerationEnd,
-		OnUsage:           hooks.OnUsage,
-		OnCallError:       hooks.OnCallError,
-		OnToolCall:        hooks.OnToolCall,
-		OnToolError:       hooks.OnToolError,
-		OnToolResult:      hooks.OnToolResult,
+		OnContentDelta:     hooks.OnContentDelta,
+		OnReasoningDelta:   hooks.OnReasoningDelta,
+		OnAssistantMessage: hooks.OnAssistantMessage,
+		OnEvent:            hooks.OnEvent,
+		OnGenerationStart:  hooks.OnGenerationStart,
+		OnGenerationEnd:    hooks.OnGenerationEnd,
+		OnUsage:            hooks.OnUsage,
+		OnCallError:        hooks.OnCallError,
+		OnToolCall:         hooks.OnToolCall,
+		OnToolError:        hooks.OnToolError,
+		OnToolResult:       hooks.OnToolResult,
 	}
 }

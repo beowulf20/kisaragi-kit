@@ -241,6 +241,101 @@ func TestAgentForwardsCallErrorHook(t *testing.T) {
 	}
 }
 
+func TestAgentForwardsNewHooks(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*llm.ChatResponse{{Content: "done", Reasoning: "thinking"}},
+		onComplete: func(_ llm.ChatRequest, hooks llm.CompletionHooks) {
+			hooks.EmitReasoningDelta("thinking")
+		},
+	}
+
+	var reasoning []string
+	var assistantEvents []llm.AssistantMessageEvent
+	var eventTypes []string
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("system prompt")},
+		},
+		Hooks: Hooks{
+			OnReasoningDelta: func(delta string) {
+				reasoning = append(reasoning, delta)
+			},
+			OnAssistantMessage: func(event llm.AssistantMessageEvent) {
+				assistantEvents = append(assistantEvents, event)
+			},
+			OnEvent: func(event llm.Event) error {
+				switch event.(type) {
+				case llm.EventReasoningDelta:
+					eventTypes = append(eventTypes, "reasoning")
+				case llm.EventAssistantMessage:
+					eventTypes = append(eventTypes, "assistant")
+				}
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := agent.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Content != "done" {
+		t.Fatalf("content = %q, want done", output.Content)
+	}
+	if strings.Join(reasoning, "") != "thinking" {
+		t.Fatalf("reasoning = %q, want thinking", strings.Join(reasoning, ""))
+	}
+	if len(assistantEvents) != 1 || assistantEvents[0].Reasoning != "thinking" {
+		t.Fatalf("assistant events = %#v, want reasoning", assistantEvents)
+	}
+	if strings.Join(eventTypes, ",") != "reasoning,assistant" {
+		t.Fatalf("event types = %v, want reasoning,assistant", eventTypes)
+	}
+}
+
+func TestAgentOnEventCanAbort(t *testing.T) {
+	client := &fakeChatClient{
+		responses: []*llm.ChatResponse{{Content: "blocked"}},
+	}
+
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:   client,
+			Model:    "test-model",
+			Messages: []llm.Message{llm.NewSystemMessage("system prompt")},
+		},
+		Hooks: Hooks{
+			OnEvent: func(event llm.Event) error {
+				if _, ok := event.(llm.EventAssistantMessage); ok {
+					return errors.New("agent stopped")
+				}
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := agent.Run()
+	if err == nil || !errors.Is(err, llm.ErrCompletionEventAborted) {
+		t.Fatalf("expected event abort, got output=%#v err=%v", output, err)
+	}
+	if output == nil || output.Content != "blocked" {
+		t.Fatalf("output = %#v, want preserved content", output)
+	}
+	if len(agent.MessagesSnapshot()) != 1 {
+		t.Fatalf("agent persisted messages after abort: %#v", agent.MessagesSnapshot())
+	}
+}
+
 func TestAgentChainsConfigAndAgentHooks(t *testing.T) {
 	client := &fakeChatClient{
 		responses: []*llm.ChatResponse{{
@@ -428,18 +523,22 @@ func TestAgentConcurrentPublicMethods(t *testing.T) {
 }
 
 type fakeChatClient struct {
-	mu        sync.Mutex
-	responses []*llm.ChatResponse
-	errors    []error
-	requests  []llm.ChatRequest
-	contexts  []context.Context
+	mu         sync.Mutex
+	responses  []*llm.ChatResponse
+	errors     []error
+	requests   []llm.ChatRequest
+	contexts   []context.Context
+	onComplete func(llm.ChatRequest, llm.CompletionHooks)
 }
 
-func (c *fakeChatClient) Complete(ctx context.Context, request llm.ChatRequest, _ llm.CompletionHooks) (*llm.ChatResponse, error) {
+func (c *fakeChatClient) Complete(ctx context.Context, request llm.ChatRequest, hooks llm.CompletionHooks) (*llm.ChatResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.contexts = append(c.contexts, ctx)
 	c.requests = append(c.requests, request)
+	if c.onComplete != nil {
+		c.onComplete(request, hooks)
+	}
 	if len(c.errors) > 0 {
 		err := c.errors[0]
 		c.errors = c.errors[1:]
