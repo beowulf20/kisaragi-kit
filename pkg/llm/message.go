@@ -14,7 +14,8 @@ const (
 	Tool = "tool"
 )
 
-// Message is a provider-neutral chat message.
+// Message is a provider-neutral chat message. Content is text-only; native
+// image, audio, and other media parts are not yet part of the public API.
 type Message struct {
 	// Type is the role or category of this message.
 	Type MessageType

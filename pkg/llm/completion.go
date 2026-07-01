@@ -151,6 +151,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				if response != nil {
 					output.Content = response.Content
 					output.addUsage(request.Model, round, attempt, response.Usage)
+					output.appendAssistantResponseMessage(response)
 				}
 				return output, fmt.Errorf("chat completion aborted: %w", err)
 			}
@@ -161,10 +162,12 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 		}
 		if err := output.recordUsage(input.Hooks, request.Model, round, attempt, response.Usage); err != nil {
 			output.Content = response.Content
+			output.appendAssistantResponseMessage(response)
 			return output, fmt.Errorf("chat completion aborted: %w", err)
 		}
 		if err := input.Hooks.EmitAssistantMessage(assistantMessageEvent(round, attempt, response)); err != nil {
 			output.Content = response.Content
+			output.appendAssistantResponseMessage(response)
 			return output, fmt.Errorf("chat completion aborted: %w", err)
 		}
 
@@ -342,6 +345,19 @@ func (output *CompletionCallOutput) addUsage(model string, round int, attempt in
 	output.Usage.add(event.Usage)
 	output.UsageEvents = append(output.UsageEvents, event)
 	return event, true
+}
+
+func (output *CompletionCallOutput) appendAssistantResponseMessage(response *ChatResponse) {
+	if output == nil || response == nil {
+		return
+	}
+	if len(response.ToolCalls) > 0 {
+		output.Messages = append(output.Messages, NewAssistantToolCallMessage(response.Content, response.ToolCalls))
+		return
+	}
+	if strings.TrimSpace(response.Content) != "" {
+		output.Messages = append(output.Messages, NewAssistantMessage(response.Content))
+	}
 }
 
 func completeWithProviderRetries(ctx context.Context, client ChatClient, request ChatRequest, hooks CompletionHooks, retries int, round int) (*ChatResponse, int, error) {

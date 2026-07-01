@@ -331,8 +331,12 @@ func TestAgentOnEventCanAbort(t *testing.T) {
 	if output == nil || output.Content != "blocked" {
 		t.Fatalf("output = %#v, want preserved content", output)
 	}
-	if len(agent.MessagesSnapshot()) != 1 {
-		t.Fatalf("agent persisted messages after abort: %#v", agent.MessagesSnapshot())
+	messages := agent.MessagesSnapshot()
+	if len(messages) != 2 {
+		t.Fatalf("agent messages = %#v, want system and partial assistant message", messages)
+	}
+	if messages[1].Type != llm.Assistant || messages[1].Content != "blocked" {
+		t.Fatalf("partial assistant message = %#v, want blocked transcript", messages[1])
 	}
 }
 

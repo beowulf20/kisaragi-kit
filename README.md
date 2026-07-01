@@ -139,6 +139,7 @@ Use constructors from `pkg/llm`:
 - `NewToolMessage`
 
 The completion loop returns appended assistant/tool messages through `CompletionCallOutput.Messages`, so callers can persist conversation history.
+`Message.Content` is text-only today. Native image, audio, and other media parts are intentionally outside the provider-neutral API until KKit grows typed multimodal message parts.
 
 ### Tools
 
@@ -214,11 +215,40 @@ This lets a coordinator agent call specialist agents using the same tool loop.
 `CompletionHooks` and `agent.Hooks` support:
 
 - `OnContentDelta` for streaming text
+- `OnReasoningDelta` for streamed reasoning chunks when an adapter exposes them
+- `OnAssistantMessage` after one provider response and before requested tools run
+- `OnEvent` for typed lifecycle events that may abort a completion by returning an error
+- `OnGenerationStart` before each provider generation attempt
+- `OnGenerationEnd` after each provider generation attempt
+- `OnUsage` after a provider generation reports token usage
 - `OnCallError` after a provider chat call fails
 - `OnToolCall` before a tool runs
 - `OnToolError` after a tool returns an error or invalid result
 - `OnToolResult` after a tool returns or fails
 - `llmtool.ApprovalHook` before approved tool execution
+
+Example:
+
+```go
+Hooks: llm.CompletionHooks{
+	OnReasoningDelta: func(delta string) {
+		fmt.Print(delta)
+	},
+	OnAssistantMessage: func(event llm.AssistantMessageEvent) {
+		fmt.Printf("assistant response: %d tool calls\n", len(event.ToolCalls))
+	},
+	OnEvent: func(event llm.Event) error {
+		if assistant, ok := event.(llm.EventAssistantMessage); ok && len(assistant.ToolCalls) > 0 {
+			return errors.New("tool calls disabled for this run")
+		}
+		return nil
+	},
+}
+```
+
+`OnEvent` uses KKit-owned event structs such as `EventAssistantMessage`, `EventToolCall`, `EventReasoningDelta`, and `EventUsage`. The `llm.Event` interface has an unexported marker method by design, so external packages can consume core events but cannot define custom event types.
+
+When `OnEvent` aborts, `Completion` returns `ErrCompletionEventAborted` wrapped in the error. If a provider response was already available, the partial `CompletionCallOutput` preserves completed content, usage, and generated assistant transcript messages before returning. Abort before a provider response, such as during streamed content or reasoning, can return no transcript message.
 
 ## Tests
 
@@ -234,7 +264,8 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 ## Design Notes
 
 - The framework core is provider-neutral; the OpenAI adapter targets OpenAI-compatible chat completion APIs.
-- Reasoning effort can be set with `CompletionCallInput.ReasoningEffort` for models/providers that support it.
+- Reasoning effort can be set with `CompletionCallInput.ReasoningEffort` for models/providers that support it. Unsupported providers or models may ignore it.
+- `ChatResponse.Reasoning` is empty when the provider does not report reasoning. `OnReasoningDelta` fires only when the adapter extracts streamed reasoning fields.
 - Provider-specific chat completion fields can be configured through `openai.ClientConfig.ChatCompletionExtraFields`.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
 - Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.

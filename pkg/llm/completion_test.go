@@ -932,6 +932,12 @@ func TestCompletionAbortableLifecycleStopsBeforeToolExecution(t *testing.T) {
 	if len(output.ToolCalls) != 0 {
 		t.Fatalf("tool calls = %#v, want none executed", output.ToolCalls)
 	}
+	if len(output.Messages) != 1 {
+		t.Fatalf("messages = %#v, want assistant tool-call message", output.Messages)
+	}
+	if output.Messages[0].Type != Assistant || len(output.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("assistant message = %#v, want blocked tool call transcript", output.Messages[0])
+	}
 	if len(client.requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(client.requests))
 	}
@@ -966,6 +972,9 @@ func TestCompletionAbortableLifecyclePreservesCompletedOutput(t *testing.T) {
 	}
 	if output.Usage.TotalTokens != 3 || len(output.UsageEvents) != 1 {
 		t.Fatalf("usage = %#v events=%#v, want preserved usage", output.Usage, output.UsageEvents)
+	}
+	if len(output.Messages) != 1 || output.Messages[0].Type != Assistant || output.Messages[0].Content != "partial done" {
+		t.Fatalf("messages = %#v, want preserved assistant transcript", output.Messages)
 	}
 }
 

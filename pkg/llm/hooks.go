@@ -32,6 +32,7 @@ type CompletionHooks struct {
 var ErrCompletionEventAborted = fmt.Errorf("completion event hook aborted")
 
 // Event is a typed lifecycle event emitted by CompletionHooks.OnEvent.
+// The unexported marker keeps the event set closed to KKit core events.
 type Event interface {
 	completionEvent()
 }

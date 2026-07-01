@@ -214,17 +214,25 @@ func (a *Agent) complete(input llm.CompletionCallInput) (*llm.CompletionCallOutp
 
 	output, err := llm.Completion(input)
 	if err != nil {
+		a.appendOutputMessages(output, false)
 		return output, err
 	}
 
+	a.appendOutputMessages(output, true)
+	return output, nil
+}
+
+func (a *Agent) appendOutputMessages(output *llm.CompletionCallOutput, fallbackContent bool) {
+	if output == nil {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(output.Messages) > 0 {
 		a.Messages = append(a.Messages, output.Messages...)
-	} else if strings.TrimSpace(output.Content) != "" {
+	} else if fallbackContent && strings.TrimSpace(output.Content) != "" {
 		a.Messages = append(a.Messages, llm.NewAssistantMessage(output.Content))
 	}
-	return output, nil
 }
 
 func (a *Agent) completionInputLocked(messages []llm.Message) llm.CompletionCallInput {
