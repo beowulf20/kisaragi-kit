@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/beowulf20/kisaragi-kit/compare/v1.8.0...v1.8.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **llm:** preserve abort transcripts ([f02724b](https://github.com/beowulf20/kisaragi-kit/commit/f02724b00e6789ab1600773054444009bd5590a7))
+
 ## [1.8.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.7.0...v1.8.0) (2026-06-30)
 
 
