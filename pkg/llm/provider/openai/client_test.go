@@ -1,7 +1,9 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,6 +129,51 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	}
 	if !strings.Contains(requestBody, `"provider_option":{"mode":"custom"}`) {
 		t.Fatalf("request missing extra provider field:\n%s", requestBody)
+	}
+}
+
+func TestCompletionGuardrailStopsOpenAIStreamBeforeBlockedDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, data := range []string{
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"safe "},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":"secret"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":" unreachable"},"finish_reason":null}]}`,
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client, _, err := NewClient(ClientConfig{BaseURL: server.URL, APIKey: "test-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardrail := llm.NewMessageGuardrail("secret", func(_ context.Context, input llm.MessageGuardrailInput) (llm.MessageGuardrailDecision, error) {
+		if input.Phase == llm.MessageGuardrailPhaseAssistantContentDelta && strings.Contains(input.Message.Content, "secret") {
+			return llm.MessageGuardrailDecision{Action: llm.MessageGuardrailBlock}, nil
+		}
+		return llm.MessageGuardrailDecision{Action: llm.MessageGuardrailAllow}, nil
+	})
+	var observed []string
+	output, err := llm.Completion(llm.CompletionCallInput{
+		Client:            client,
+		Model:             "test-model",
+		Messages:          []llm.Message{llm.NewUserMessage("hello")},
+		MessageGuardrails: []llm.MessageGuardrail{guardrail},
+		Hooks: llm.CompletionHooks{OnContentDelta: func(delta string) {
+			observed = append(observed, delta)
+		}},
+	})
+	if err == nil || !errors.Is(err, llm.ErrMessageGuardrailBlocked) {
+		t.Fatalf("expected guardrail block, got output=%#v err=%v", output, err)
+	}
+	if output == nil || output.Content != "safe " {
+		t.Fatalf("output = %#v, want safe prefix", output)
+	}
+	if strings.Join(observed, "") != "safe " {
+		t.Fatalf("observed = %q, want safe prefix", strings.Join(observed, ""))
 	}
 }
 

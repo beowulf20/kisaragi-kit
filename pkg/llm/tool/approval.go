@@ -51,10 +51,15 @@ type ApprovalPolicy struct {
 
 // ApprovalRequest is passed to an approval hook before the tool handler runs.
 type ApprovalRequest struct {
-	ToolName    string
-	Description string
-	Arguments   json.RawMessage
-	Policy      ApprovalPolicy
+	ToolCallID       string
+	ToolName         string
+	Description      string
+	Arguments        json.RawMessage
+	Policy           ApprovalPolicy
+	RequiredByPolicy bool
+	PolicyReason     string
+	Round            int
+	Model            string
 }
 
 // ApprovalDecision is returned by an approval hook.
@@ -65,11 +70,16 @@ type ApprovalDecision struct {
 
 // ApprovalRecord records the approval decision for one tool call.
 type ApprovalRecord struct {
-	ToolName  string
-	Arguments json.RawMessage
-	Policy    ApprovalPolicy
-	Approved  bool
-	Reason    string
+	ToolCallID       string
+	ToolName         string
+	Arguments        json.RawMessage
+	Policy           ApprovalPolicy
+	RequiredByPolicy bool
+	PolicyReason     string
+	Approved         bool
+	Reason           string
+	Round            int
+	Model            string
 }
 
 // ApprovalHook decides whether a tool call may execute.
@@ -88,15 +98,20 @@ func (policy ApprovalPolicy) requiresApproval() bool {
 	}
 }
 
-func approveToolCall(ctx context.Context, hook ApprovalHook, tool Tool, args json.RawMessage) (*ApprovalRecord, error) {
-	if !tool.Approval.requiresApproval() {
+func approveToolCall(ctx context.Context, hook ApprovalHook, request ToolCallRequest, tool Tool, args json.RawMessage, required bool, requiredByPolicy bool, policyReason string) (*ApprovalRecord, error) {
+	if !required {
 		return nil, nil
 	}
 
 	record := &ApprovalRecord{
-		ToolName:  tool.Name,
-		Arguments: append(json.RawMessage(nil), args...),
-		Policy:    tool.Approval,
+		ToolCallID:       request.ID,
+		ToolName:         tool.Name,
+		Arguments:        append(json.RawMessage(nil), args...),
+		Policy:           tool.Approval,
+		RequiredByPolicy: requiredByPolicy,
+		PolicyReason:     policyReason,
+		Round:            request.Round,
+		Model:            request.Model,
 	}
 	if hook == nil {
 		record.Reason = "approval hook missing"
@@ -104,10 +119,15 @@ func approveToolCall(ctx context.Context, hook ApprovalHook, tool Tool, args jso
 	}
 
 	decision, err := hook(ctx, ApprovalRequest{
-		ToolName:    tool.Name,
-		Description: tool.Description,
-		Arguments:   args,
-		Policy:      tool.Approval,
+		ToolCallID:       request.ID,
+		ToolName:         tool.Name,
+		Description:      tool.Description,
+		Arguments:        args,
+		Policy:           tool.Approval,
+		RequiredByPolicy: requiredByPolicy,
+		PolicyReason:     policyReason,
+		Round:            request.Round,
+		Model:            request.Model,
 	})
 	if err != nil {
 		record.Reason = err.Error()
@@ -124,6 +144,25 @@ func approveToolCall(ctx context.Context, hook ApprovalHook, tool Tool, args jso
 	return record, nil
 }
 
+func (policy ApprovalPolicy) validate() error {
+	switch policy.Mode {
+	case "", ApprovalNever, ApprovalOnRisk, ApprovalAlways:
+	default:
+		return fmt.Errorf("invalid approval mode %q", policy.Mode)
+	}
+	switch policy.Risk {
+	case "", RiskLow, RiskMedium, RiskHigh:
+	default:
+		return fmt.Errorf("invalid approval risk %q", policy.Risk)
+	}
+	switch policy.Preview {
+	case "", PreviewNone, PreviewPayload, PreviewDiff, PreviewCommand:
+	default:
+		return fmt.Errorf("invalid approval preview %q", policy.Preview)
+	}
+	return nil
+}
+
 // NewStdioApprovalHook asks for human approval over stdin/stdout.
 func NewStdioApprovalHook(in io.Reader, out io.Writer) ApprovalHook {
 	reader := bufio.NewReader(in)
@@ -134,6 +173,9 @@ func NewStdioApprovalHook(in io.Reader, out io.Writer) ApprovalHook {
 			fmt.Fprintf(out, "Intent: %s\n", request.Policy.Description)
 		} else if request.Description != "" {
 			fmt.Fprintf(out, "Intent: %s\n", request.Description)
+		}
+		if request.RequiredByPolicy && request.PolicyReason != "" {
+			fmt.Fprintf(out, "Policy: %s\n", request.PolicyReason)
 		}
 		fmt.Fprintf(out, "Risk: %s\n", request.Policy.Risk)
 		if request.Policy.Preview != "" && request.Policy.Preview != PreviewNone {

@@ -190,6 +190,7 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 
 func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, string, error) {
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
+	defer func() { _ = stream.Close() }()
 	acc := openaisdk.ChatCompletionAccumulator{}
 	var reasoning strings.Builder
 

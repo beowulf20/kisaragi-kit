@@ -28,6 +28,7 @@ go get github.com/beowulf20/kisaragi-kit
 | `pkg/llm` | Provider-neutral message types, completion loop, hook events, tool-call transcript handling. |
 | `pkg/llm/tool` | Generic `NewTool[I, O]` helper, toolbox registry, JSON schema generation, typed input decoding. |
 | `pkg/llm/agent` | Stateful agents with persistent messages, transient runs, streaming hooks, and `AsTool()` delegation. |
+| `pkg/llm/guardrail` | Attachable message guardrails for system-prompt and internal tool-metadata leaks. |
 | `pkg/llm/provider/openai` | OpenAI-compatible client adapter, streaming conversion, model listing, and tool/message translation. |
 
 ## Quickstart
@@ -126,6 +127,12 @@ OPENAI_API_KEY=... go run ./examples/approval
 OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.1 OPENAI_REASONING_EFFORT=low go run ./examples/approval
 ```
 
+Run the system-prompt guardrail example:
+
+```bash
+OPENAI_API_KEY=... go run ./examples/guardrails
+```
+
 ## Core Concepts
 
 ### Messages
@@ -179,6 +186,47 @@ _ = toolbox.RegisterTool(tool)
 Custom approval hooks can show diffs, command previews, UI prompts, or audit-log entries. If a tool requires approval and no hook is installed, the call fails with `ErrApprovalDenied`.
 
 Agents persist approval decisions when `CompletionCallInput.ApprovalDecisionMessages` enables accepted or rejected transcript messages.
+
+Applications can enforce every toolbox call centrally with `llmtool.WithToolPolicyHook`. Tool metadata and application policy compose strictest-first: deny, require approval, then allow. Arguments are validated against the tool schema and canonicalized before policy and approval hooks run; typed handler decoding and execution happen only after authorization.
+
+### Message Guardrails
+
+Message guardrails are ordered, provider-neutral allow/block checks registered through `CompletionCallInput.MessageGuardrails`:
+
+```go
+leakGuardrail, err := guardrail.NewSystemPromptLeakGuardrail(guardrail.SystemPromptLeakConfig{
+	Threshold:     0.20,
+	MinMatchWords: 8,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+input.MessageGuardrails = []llm.MessageGuardrail{leakGuardrail}
+```
+
+KKit checks initial system/user/assistant/tool messages, streamed assistant content and reasoning, final assistant content/tool arguments, and tool results. Guardrails receive a cloned candidate and conversation context. They return explicit `allow` or `block` decisions; the first block or callback error fails closed with `ErrMessageGuardrailBlocked`.
+
+Streaming remains live. KKit evaluates the full proposed accumulated content before forwarding each delta. A threshold-crossing delta is withheld and the provider stream stops, but earlier allowed deltas cannot be recalled. The returned output contains that allowed prefix for UI reconciliation; stateful agents do not persist the blocked partial assistant candidate.
+
+The bundled system-prompt matcher uses configurable exact normalized word-shingle coverage. It is a practical leakage tripwire, not semantic moderation: tune its threshold and minimum match length for each prompt and threat model.
+
+Tool metadata can be snapshotted from a configured toolbox and attached beside the prompt matcher:
+
+```go
+toolLeak, err := guardrail.NewToolMetadataLeakGuardrail(
+	tools.ChatTools(),
+	guardrail.ToolMetadataLeakConfig{
+		ExcludedNames:          []string{"customer_reference"},
+		AdditionalBlockedNames: []string{"ops_alias"},
+	},
+)
+if err != nil {
+	log.Fatal(err)
+}
+```
+
+The tool-metadata matcher collects tool names plus recursive parameter names of at least eight characters by default. Matching is case-insensitive at exact identifier boundaries. It scans assistant content/reasoning, string values inside tool arguments, and tool-result text while ignoring structural function names and JSON keys, so legitimate tool calls still execute. The constructor takes a snapshot; recreate it after registering more tools.
 
 ### Agents
 
@@ -268,6 +316,7 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 - `ChatResponse.Reasoning` is empty when the provider does not report reasoning. `OnReasoningDelta` fires only when the adapter extracts streamed reasoning fields.
 - Provider-specific chat completion fields can be configured through `openai.ClientConfig.ChatCompletionExtraFields`.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
+- Aggregate provider attempts, total tool calls, repeated identical calls, and approval denials have configurable completion limits (defaults: 32, 64, 4, and 3). `MaxTotalTokens` is optional because some providers omit usage.
 - Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.
 - Approval accept/reject transcript messages are opt-in through `CompletionCallInput.ApprovalDecisionMessages`.
 - Tool errors are returned to the model as JSON error payloads capped by `CompletionCallInput.MaxToolErrorLength`.

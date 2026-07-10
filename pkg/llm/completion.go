@@ -28,6 +28,8 @@ type CompletionCallInput struct {
 	Tools llmtool.Toolbox
 	// Hooks receives streaming content and tool execution events.
 	Hooks CompletionHooks
+	// MessageGuardrails inspect messages and streamed assistant candidates before they advance.
+	MessageGuardrails []MessageGuardrail
 	// ToolErrorInterceptor can rewrite tool error feedback or abort on tool failure.
 	ToolErrorInterceptor ToolErrorInterceptor
 	// ApprovalDecisionMessages controls whether human approval decisions are added to output messages.
@@ -38,6 +40,16 @@ type CompletionCallInput struct {
 	MaxToolErrorLength int
 	// ProviderErrorRetries caps retries after provider completion errors. Nil uses DefaultProviderErrorRetries.
 	ProviderErrorRetries *int
+	// MaxProviderAttempts caps provider calls across all rounds. Zero uses the package default.
+	MaxProviderAttempts int
+	// MaxToolCalls caps tool executions across the completion. Zero uses the package default.
+	MaxToolCalls int
+	// MaxRepeatedToolCalls caps identical tool name/canonical-argument calls. Zero uses the package default.
+	MaxRepeatedToolCalls int
+	// MaxApprovalDenials aborts after this many rejected approvals. Zero uses the package default.
+	MaxApprovalDenials int
+	// MaxTotalTokens caps reported aggregate tokens. Zero disables this provider-dependent limit.
+	MaxTotalTokens int
 }
 
 // ToolErrorInterceptor handles tool execution errors before feedback is sent to the model.
@@ -88,8 +100,26 @@ func (input CompletionCallInput) Validate() error {
 	if input.ProviderErrorRetries != nil && *input.ProviderErrorRetries < 0 {
 		return errors.New("provider error retries cannot be negative")
 	}
+	if input.MaxProviderAttempts < 0 {
+		return errors.New("max provider attempts cannot be negative")
+	}
+	if input.MaxToolCalls < 0 {
+		return errors.New("max tool calls cannot be negative")
+	}
+	if input.MaxRepeatedToolCalls < 0 {
+		return errors.New("max repeated tool calls cannot be negative")
+	}
+	if input.MaxApprovalDenials < 0 {
+		return errors.New("max approval denials cannot be negative")
+	}
+	if input.MaxTotalTokens < 0 {
+		return errors.New("max total tokens cannot be negative")
+	}
 	if !input.ReasoningEffort.valid() {
 		return fmt.Errorf("reasoning effort must be one of none, minimal, low, medium, high, xhigh")
+	}
+	if err := validateMessageGuardrails(input.MessageGuardrails); err != nil {
+		return err
 	}
 	return nil
 }
@@ -136,6 +166,13 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 	maxToolCallRounds := input.effectiveMaxToolCallRounds()
 	maxToolErrorLength := input.effectiveMaxToolErrorLength()
 	providerErrorRetries := input.effectiveProviderErrorRetries()
+	budget := newCompletionBudgetState(input)
+	for index, message := range messages {
+		contextMessages := append(cloneMessages(messages[:index]), cloneMessages(messages[index+1:])...)
+		if err := input.evaluateMessage(ctx, MessageGuardrailPhaseInput, message, contextMessages, 0, 0); err != nil {
+			return nil, fmt.Errorf("initial message blocked: %w", err)
+		}
+	}
 
 	for round := 0; round <= maxToolCallRounds; round++ {
 		request := ChatRequest{
@@ -145,8 +182,14 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			ReasoningEffort: input.ReasoningEffort,
 			Tools:           tools,
 		}
-		response, attempt, err := completeWithProviderRetries(ctx, input.Client, request, input.Hooks, providerErrorRetries, round)
+		response, attempt, streamState, err := completeWithProviderRetries(ctx, input, request, providerErrorRetries, round, budget)
 		if err != nil {
+			if errors.Is(err, ErrMessageGuardrailBlocked) {
+				if streamState != nil {
+					output.Content = streamState.safeContent
+				}
+				return output, fmt.Errorf("chat completion blocked: %w", err)
+			}
 			if errors.Is(err, ErrCompletionEventAborted) {
 				if response != nil {
 					output.Content = response.Content
@@ -164,6 +207,26 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			output.Content = response.Content
 			output.appendAssistantResponseMessage(response)
 			return output, fmt.Errorf("chat completion aborted: %w", err)
+		}
+		if len(response.ToolCalls) > 0 || response.Usage != nil {
+			if err := budget.checkUsage(output, response); err != nil {
+				return output, err
+			}
+		}
+		if strings.TrimSpace(response.Reasoning) != "" {
+			if err := input.evaluateMessage(ctx, MessageGuardrailPhaseAssistantReasoningFinal, NewAssistantMessage(response.Reasoning), messages, round, attempt); err != nil {
+				if streamState != nil {
+					output.Content = streamState.safeContent
+				}
+				return output, fmt.Errorf("assistant reasoning blocked: %w", err)
+			}
+		}
+		assistantCandidate := NewAssistantToolCallMessage(response.Content, response.ToolCalls)
+		if err := input.evaluateMessage(ctx, MessageGuardrailPhaseAssistantFinal, assistantCandidate, messages, round, attempt); err != nil {
+			if streamState != nil {
+				output.Content = streamState.safeContent
+			}
+			return output, fmt.Errorf("assistant message blocked: %w", err)
 		}
 		if err := input.Hooks.EmitAssistantMessage(assistantMessageEvent(round, attempt, response)); err != nil {
 			output.Content = response.Content
@@ -193,12 +256,29 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				Name:      toolCall.Name,
 				Arguments: toolCall.Arguments,
 			}
+			if err := budget.consumeToolCall(call); err != nil {
+				return output, err
+			}
 			if err := input.Hooks.EmitToolCallEvent(round, call); err != nil {
 				return output, fmt.Errorf("chat completion aborted: %w", err)
 			}
 
-			callOutput, err := input.Tools.CallWithInfo(ctx, toolCall.Name, toolCall.Arguments)
+			callOutput, err := input.Tools.CallWithRequest(ctx, llmtool.ToolCallRequest{
+				ID:        toolCall.ID,
+				Name:      toolCall.Name,
+				Arguments: toolCall.Arguments,
+				Round:     round,
+				Model:     input.Model,
+			})
 			if err != nil {
+				if errors.Is(err, llmtool.ErrToolPolicyDenied) {
+					return output, fmt.Errorf("tool %q blocked: %w", toolCall.Name, err)
+				}
+				if callOutput.Approval != nil && !callOutput.Approval.Approved {
+					if budgetErr := budget.consumeApprovalDenial(); budgetErr != nil {
+						return output, budgetErr
+					}
+				}
 				if hookErr := input.Hooks.EmitToolErrorEvent(round, call, err); hookErr != nil {
 					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
 				}
@@ -207,13 +287,19 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
 				}
 				call.Result = feedback
+				toolMessage := NewToolMessage(toolCall.ID, feedback)
+				if guardrailErr := input.evaluateMessage(ctx, MessageGuardrailPhaseToolResult, toolMessage, messages, round, attempt); guardrailErr != nil {
+					return output, fmt.Errorf("tool result blocked: %w", guardrailErr)
+				}
 				if hookErr := input.Hooks.EmitToolResultEvent(round, call); hookErr != nil {
 					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
 				}
 				output.ToolCalls = append(output.ToolCalls, call)
-				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
-				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
-				input.appendApprovalDecisionMessage(output, callOutput.Approval)
+				output.Messages = append(output.Messages, toolMessage)
+				messages = append(messages, toolMessage)
+				if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
+					return output, guardrailErr
+				}
 				continue
 			}
 			if callOutput.Result == nil {
@@ -226,39 +312,76 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 					return nil, fmt.Errorf("tool %q failed: %w", toolCall.Name, err)
 				}
 				call.Result = feedback
+				toolMessage := NewToolMessage(toolCall.ID, feedback)
+				if guardrailErr := input.evaluateMessage(ctx, MessageGuardrailPhaseToolResult, toolMessage, messages, round, attempt); guardrailErr != nil {
+					return output, fmt.Errorf("tool result blocked: %w", guardrailErr)
+				}
 				if hookErr := input.Hooks.EmitToolResultEvent(round, call); hookErr != nil {
 					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
 				}
 				output.ToolCalls = append(output.ToolCalls, call)
-				output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, feedback))
-				messages = append(messages, NewToolMessage(toolCall.ID, feedback))
-				input.appendApprovalDecisionMessage(output, callOutput.Approval)
+				output.Messages = append(output.Messages, toolMessage)
+				messages = append(messages, toolMessage)
+				if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
+					return output, guardrailErr
+				}
 				continue
 			}
 
 			call.Result = *callOutput.Result
+			toolMessage := NewToolMessage(toolCall.ID, *callOutput.Result)
+			if guardrailErr := input.evaluateMessage(ctx, MessageGuardrailPhaseToolResult, toolMessage, messages, round, attempt); guardrailErr != nil {
+				return output, fmt.Errorf("tool result blocked: %w", guardrailErr)
+			}
 			if err := input.Hooks.EmitToolResultEvent(round, call); err != nil {
 				return output, fmt.Errorf("chat completion aborted: %w", err)
 			}
 			output.ToolCalls = append(output.ToolCalls, call)
-			output.Messages = append(output.Messages, NewToolMessage(toolCall.ID, *callOutput.Result))
-			messages = append(messages, NewToolMessage(toolCall.ID, *callOutput.Result))
-			input.appendApprovalDecisionMessage(output, callOutput.Approval)
+			output.Messages = append(output.Messages, toolMessage)
+			messages = append(messages, toolMessage)
+			if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
+				return output, guardrailErr
+			}
 		}
 	}
 
 	return nil, fmt.Errorf("exceeded %d tool call rounds", maxToolCallRounds)
 }
 
-func (input CompletionCallInput) appendApprovalDecisionMessage(output *CompletionCallOutput, approval *llmtool.ApprovalRecord) {
+func (input CompletionCallInput) evaluateMessage(
+	ctx context.Context,
+	phase MessageGuardrailPhase,
+	message Message,
+	messages []Message,
+	round int,
+	attempt int,
+) error {
+	return evaluateMessageGuardrails(ctx, input.MessageGuardrails, MessageGuardrailInput{
+		Message:  message,
+		Messages: messages,
+		Phase:    phase,
+		Model:    input.Model,
+		Round:    round,
+		Attempt:  attempt,
+	})
+}
+
+func (input CompletionCallInput) appendApprovalDecisionMessage(
+	ctx context.Context,
+	output *CompletionCallOutput,
+	approval *llmtool.ApprovalRecord,
+	messages []Message,
+	round int,
+	attempt int,
+) error {
 	if output == nil || approval == nil {
-		return
+		return nil
 	}
 	if approval.Approved && !input.ApprovalDecisionMessages.AppendAccepted {
-		return
+		return nil
 	}
 	if !approval.Approved && !input.ApprovalDecisionMessages.AppendRejected {
-		return
+		return nil
 	}
 
 	status := "rejected"
@@ -277,9 +400,14 @@ func (input CompletionCallInput) appendApprovalDecisionMessage(output *Completio
 
 	data, err := json.Marshal(message)
 	if err != nil {
-		return
+		return nil
 	}
-	output.Messages = append(output.Messages, NewUserMessage(string(data)))
+	decisionMessage := NewUserMessage(string(data))
+	if err := input.evaluateMessage(ctx, MessageGuardrailPhaseApprovalDecision, decisionMessage, messages, round, attempt); err != nil {
+		return fmt.Errorf("approval decision blocked: %w", err)
+	}
+	output.Messages = append(output.Messages, decisionMessage)
+	return nil
 }
 
 func (input CompletionCallInput) interceptToolError(toolCall ToolCall, err error, round int, maxToolErrorLength int) (string, bool) {
@@ -360,9 +488,21 @@ func (output *CompletionCallOutput) appendAssistantResponseMessage(response *Cha
 	}
 }
 
-func completeWithProviderRetries(ctx context.Context, client ChatClient, request ChatRequest, hooks CompletionHooks, retries int, round int) (*ChatResponse, int, error) {
+type messageGuardrailStreamState struct {
+	safeContent              string
+	safeReasoning            string
+	terminal                 error
+	contentCallbackHandled   bool
+	reasoningCallbackHandled bool
+}
+
+func completeWithProviderRetries(ctx context.Context, input CompletionCallInput, request ChatRequest, retries int, round int, budget *completionBudgetState) (*ChatResponse, int, *messageGuardrailStreamState, error) {
 	var lastErr error
+	var lastState *messageGuardrailStreamState
 	for attempt := 0; attempt <= retries; attempt++ {
+		if err := budget.consumeProviderAttempt(); err != nil {
+			return nil, attempt, lastState, err
+		}
 		start := GenerationStartEvent{
 			Model:              request.Model,
 			Round:              round,
@@ -370,11 +510,17 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			MessageCount:       len(request.Messages),
 			AvailableToolCount: len(request.Tools),
 		}
-		if err := hooks.EmitGenerationStartEvent(start); err != nil {
-			return nil, attempt, err
+		if err := input.Hooks.EmitGenerationStartEvent(start); err != nil {
+			return nil, attempt, nil, err
 		}
 
-		response, err := client.Complete(ctx, request, hooks)
+		state := &messageGuardrailStreamState{}
+		lastState = state
+		streamHooks := input.guardedStreamHooks(ctx, request.Messages, round, attempt, state)
+		response, err := input.Client.Complete(ctx, request, streamHooks)
+		if err == nil && state.terminal != nil {
+			err = state.terminal
+		}
 		if err == nil {
 			end := GenerationEndEvent{
 				Model:              request.Model,
@@ -387,12 +533,12 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			if response != nil {
 				end.ToolCallCount = len(response.ToolCalls)
 			}
-			if err := hooks.EmitGenerationEndEvent(end); err != nil {
-				return response, attempt, err
+			if err := input.Hooks.EmitGenerationEndEvent(end); err != nil {
+				return response, attempt, state, err
 			}
-			return response, attempt, nil
+			return response, attempt, state, nil
 		}
-		endErr := hooks.EmitGenerationEndEvent(GenerationEndEvent{
+		endErr := input.Hooks.EmitGenerationEndEvent(GenerationEndEvent{
 			Model:              request.Model,
 			Round:              round,
 			Attempt:            attempt,
@@ -401,15 +547,87 @@ func completeWithProviderRetries(ctx context.Context, client ChatClient, request
 			Err:                err,
 		})
 		if endErr != nil {
-			return nil, attempt, endErr
+			return nil, attempt, state, endErr
 		}
-		if errors.Is(err, ErrCompletionEventAborted) {
-			return nil, attempt, err
+		if errors.Is(err, ErrCompletionEventAborted) || errors.Is(err, ErrMessageGuardrailBlocked) {
+			return nil, attempt, state, err
 		}
-		hooks.EmitCallError(err)
+		input.Hooks.EmitCallError(err)
 		lastErr = err
 	}
-	return nil, retries, lastErr
+	return nil, retries, lastState, lastErr
+}
+
+func (input CompletionCallInput) guardedStreamHooks(
+	ctx context.Context,
+	messages []Message,
+	round int,
+	attempt int,
+	state *messageGuardrailStreamState,
+) CompletionHooks {
+	handleContent := func(delta string) error {
+		if state.terminal != nil {
+			return state.terminal
+		}
+		candidate := state.safeContent + delta
+		if err := input.evaluateMessage(ctx, MessageGuardrailPhaseAssistantContentDelta, NewAssistantMessage(candidate), messages, round, attempt); err != nil {
+			state.terminal = err
+			return err
+		}
+		state.safeContent = candidate
+		if err := input.Hooks.EmitContentDeltaEvent(delta); err != nil {
+			state.terminal = err
+			return err
+		}
+		return nil
+	}
+	handleReasoning := func(delta string) error {
+		if state.terminal != nil {
+			return state.terminal
+		}
+		candidate := state.safeReasoning + delta
+		if err := input.evaluateMessage(ctx, MessageGuardrailPhaseAssistantReasoningDelta, NewAssistantMessage(candidate), messages, round, attempt); err != nil {
+			state.terminal = err
+			return err
+		}
+		state.safeReasoning = candidate
+		if err := input.Hooks.EmitReasoningDelta(delta); err != nil {
+			state.terminal = err
+			return err
+		}
+		return nil
+	}
+	return CompletionHooks{
+		OnContentDelta: func(delta string) {
+			state.contentCallbackHandled = true
+			_ = handleContent(delta)
+		},
+		OnReasoningDelta: func(delta string) {
+			state.reasoningCallbackHandled = true
+			_ = handleReasoning(delta)
+		},
+		OnEvent: func(event Event) error {
+			switch typed := event.(type) {
+			case EventContentDelta:
+				if state.contentCallbackHandled {
+					state.contentCallbackHandled = false
+					return state.terminal
+				}
+				return handleContent(typed.Delta)
+			case EventReasoningDelta:
+				if state.reasoningCallbackHandled {
+					state.reasoningCallbackHandled = false
+					return state.terminal
+				}
+				return handleReasoning(typed.Delta)
+			default:
+				if state.terminal != nil {
+					return state.terminal
+				}
+				return input.Hooks.EmitEvent(event)
+			}
+		},
+	}
 }
 
 func assistantMessageEvent(round int, attempt int, response *ChatResponse) AssistantMessageEvent {

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **llm:** add provider-neutral message guardrails and bounded-run controls
+* **guardrail:** add attachable system-prompt leakage matcher
+* **guardrail:** add attachable tool-metadata leakage matcher
+* **tool:** add central policy hooks and validated approval flow
+
 ## [1.8.1](https://github.com/beowulf20/kisaragi-kit/compare/v1.8.0...v1.8.1) (2026-07-01)
 
 

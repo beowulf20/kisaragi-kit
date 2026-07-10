@@ -595,3 +595,156 @@ func TestStdioApprovalHookApprovesYes(t *testing.T) {
 		t.Fatalf("prompt = %q, want approval text", out.String())
 	}
 }
+
+func TestToolboxPolicyDeniesBeforeHandler(t *testing.T) {
+	handlerCalled := false
+	toolbox := NewToolbox(WithToolPolicyHook(func(_ context.Context, request ToolPolicyRequest) (ToolPolicyDecision, error) {
+		if request.ToolCallID != "call_1" || request.Round != 2 || request.Model != "test-model" {
+			t.Fatalf("request = %#v", request)
+		}
+		return ToolPolicyDecision{Action: ToolPolicyDeny, Reason: "not allowed"}, nil
+	}))
+	if err := toolbox.RegisterTool(NewTool("dangerous", "Dangerous operation.", func(context.Context, struct{}) (struct{}, error) {
+		handlerCalled = true
+		return struct{}{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := toolbox.CallWithRequest(context.Background(), ToolCallRequest{
+		ID: "call_1", Name: "dangerous", Arguments: `{}`, Round: 2, Model: "test-model",
+	})
+	if err == nil || !errors.Is(err, ErrToolPolicyDenied) {
+		t.Fatalf("expected policy denial, got %v", err)
+	}
+	if handlerCalled {
+		t.Fatal("handler ran after policy denial")
+	}
+}
+
+func TestToolboxValidatesArgumentsBeforePolicyAndApproval(t *testing.T) {
+	policyCalled := false
+	approvalCalled := false
+	handlerCalled := false
+	toolbox := NewToolbox(
+		WithToolPolicyHook(func(context.Context, ToolPolicyRequest) (ToolPolicyDecision, error) {
+			policyCalled = true
+			return ToolPolicyDecision{Action: ToolPolicyRequireApproval}, nil
+		}),
+		WithApprovalHook(func(context.Context, ApprovalRequest) (ApprovalDecision, error) {
+			approvalCalled = true
+			return ApprovalDecision{Approved: true}, nil
+		}),
+	)
+	if err := toolbox.RegisterTool(NewTool("greet", "Greets.", func(_ context.Context, input struct {
+		Name string `json:"name"`
+	}) (struct{}, error) {
+		handlerCalled = true
+		return struct{}{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := toolbox.Call(context.Background(), "greet", `{"name":"Ada","unknown":true}`)
+	if err == nil || !strings.Contains(err.Error(), "unknown argument") {
+		t.Fatalf("expected validation error, got %v", err)
+	}
+	if policyCalled || approvalCalled || handlerCalled {
+		t.Fatalf("called policy=%v approval=%v handler=%v", policyCalled, approvalCalled, handlerCalled)
+	}
+}
+
+func TestToolboxRejectsMissingRequiredArgumentsBeforeApproval(t *testing.T) {
+	approvalCalled := false
+	toolbox := NewToolbox(WithApprovalHook(func(context.Context, ApprovalRequest) (ApprovalDecision, error) {
+		approvalCalled = true
+		return ApprovalDecision{Approved: true}, nil
+	}))
+	if err := toolbox.RegisterTool(NewTool("greet", "Greets.", func(_ context.Context, input struct {
+		Name string `json:"name"`
+	}) (struct{}, error) {
+		return struct{}{}, nil
+	}, WithApproval(ApprovalPolicy{Mode: ApprovalAlways}))); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := toolbox.Call(context.Background(), "greet", `{}`)
+	if err == nil || !strings.Contains(err.Error(), "missing required argument name") {
+		t.Fatalf("expected required argument error, got %v", err)
+	}
+	if approvalCalled {
+		t.Fatal("approval ran before required argument validation")
+	}
+}
+
+func TestToolboxStrictestPolicyRequiresApprovalWithCanonicalArguments(t *testing.T) {
+	var policyArguments string
+	var approvalArguments string
+	toolbox := NewToolbox(
+		WithToolPolicyHook(func(_ context.Context, request ToolPolicyRequest) (ToolPolicyDecision, error) {
+			policyArguments = string(request.Arguments)
+			return ToolPolicyDecision{Action: ToolPolicyAllow}, nil
+		}),
+		WithApprovalHook(func(_ context.Context, request ApprovalRequest) (ApprovalDecision, error) {
+			approvalArguments = string(request.Arguments)
+			return ApprovalDecision{Approved: true}, nil
+		}),
+	)
+	if err := toolbox.RegisterTool(NewTool("combine", "Combines values.", func(_ context.Context, input struct {
+		A int `json:"a"`
+		B int `json:"b"`
+	}) (int, error) {
+		return input.A + input.B, nil
+	}, WithApproval(ApprovalPolicy{Mode: ApprovalAlways, Risk: RiskHigh}))); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := toolbox.Call(context.Background(), "combine", `{"b":2,"a":1}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || *result != "3" {
+		t.Fatalf("result = %v, want 3", result)
+	}
+	if policyArguments != `{"a":1,"b":2}` || approvalArguments != policyArguments {
+		t.Fatalf("policy=%q approval=%q, want canonical arguments", policyArguments, approvalArguments)
+	}
+}
+
+func TestToolboxRejectsInvalidApprovalPolicyAtRegistration(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy ApprovalPolicy
+		want   string
+	}{
+		{name: "mode", policy: ApprovalPolicy{Mode: ApprovalMode("sometimes")}, want: "invalid approval mode"},
+		{name: "risk", policy: ApprovalPolicy{Risk: RiskLevel("critical")}, want: "invalid approval risk"},
+		{name: "preview", policy: ApprovalPolicy{Preview: PreviewKind("html")}, want: "invalid approval preview"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toolbox := NewToolbox()
+			err := toolbox.RegisterTool(NewTool("bad", "Bad policy.", func(context.Context, struct{}) (struct{}, error) {
+				return struct{}{}, nil
+			}, WithApproval(tt.policy)))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestToolboxInvalidPolicyDecisionFailsClosed(t *testing.T) {
+	toolbox := NewToolbox(WithToolPolicyHook(func(context.Context, ToolPolicyRequest) (ToolPolicyDecision, error) {
+		return ToolPolicyDecision{}, nil
+	}))
+	if err := toolbox.RegisterTool(NewTool("safe", "Safe.", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	_, err := toolbox.Call(context.Background(), "safe", `{}`)
+	if err == nil || !errors.Is(err, ErrToolPolicyDenied) {
+		t.Fatalf("expected fail-closed policy error, got %v", err)
+	}
+}

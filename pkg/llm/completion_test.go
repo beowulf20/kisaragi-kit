@@ -337,17 +337,28 @@ func TestCompletionCanAppendAcceptedApprovalDecisionMessages(t *testing.T) {
 		},
 	}
 
+	var sawApprovalDecision bool
+	guardrail := NewMessageGuardrail("approval-message", func(_ context.Context, input MessageGuardrailInput) (MessageGuardrailDecision, error) {
+		if input.Phase == MessageGuardrailPhaseApprovalDecision && input.Message.Type == User {
+			sawApprovalDecision = true
+		}
+		return MessageGuardrailDecision{Action: MessageGuardrailAllow}, nil
+	})
 	output, err := Completion(CompletionCallInput{
-		Client:   client,
-		Model:    "test-model",
-		Messages: []Message{NewUserMessage("say hello")},
-		Tools:    *tools,
+		Client:            client,
+		Model:             "test-model",
+		Messages:          []Message{NewUserMessage("say hello")},
+		Tools:             *tools,
+		MessageGuardrails: []MessageGuardrail{guardrail},
 		ApprovalDecisionMessages: ApprovalDecisionMessages{
 			AppendAccepted: true,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !sawApprovalDecision {
+		t.Fatal("approval decision message did not pass through guardrails")
 	}
 
 	if len(output.Messages) != 4 {
@@ -820,7 +831,7 @@ func TestCompletionUsesToolErrorInterceptorFeedback(t *testing.T) {
 	feedback := `{"error":"missing city","retryable":true,"hint":"include city"}`
 	client := &fakeChatClient{
 		responses: []*ChatResponse{
-			{ToolCalls: []ToolCall{{ID: "call_1", Name: "weather", Arguments: `{}`}}},
+			{ToolCalls: []ToolCall{{ID: "call_1", Name: "weather", Arguments: `{"city":"Curitiba"}`}}},
 			{Content: "done"},
 		},
 	}

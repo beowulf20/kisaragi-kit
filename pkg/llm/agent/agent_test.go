@@ -340,6 +340,40 @@ func TestAgentOnEventCanAbort(t *testing.T) {
 	}
 }
 
+func TestAgentDoesNotPersistMessageGuardrailBlockedPartialOutput(t *testing.T) {
+	client := guardrailStreamingClient{}
+	guardrail := llm.NewMessageGuardrail("block", func(_ context.Context, input llm.MessageGuardrailInput) (llm.MessageGuardrailDecision, error) {
+		if input.Phase == llm.MessageGuardrailPhaseAssistantContentDelta && strings.Contains(input.Message.Content, "blocked") {
+			return llm.MessageGuardrailDecision{Action: llm.MessageGuardrailBlock}, nil
+		}
+		return llm.MessageGuardrailDecision{Action: llm.MessageGuardrailAllow}, nil
+	})
+	agent, err := NewAgent(NewAgentInput{
+		Name: "test",
+		Config: llm.CompletionCallInput{
+			Client:            client,
+			Model:             "test-model",
+			Messages:          []llm.Message{llm.NewSystemMessage("system")},
+			MessageGuardrails: []llm.MessageGuardrail{guardrail},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := agent.Run()
+	if err == nil || !errors.Is(err, llm.ErrMessageGuardrailBlocked) {
+		t.Fatalf("expected guardrail error, got output=%#v err=%v", output, err)
+	}
+	if output == nil || output.Content != "safe " {
+		t.Fatalf("output = %#v, want safe prefix", output)
+	}
+	messages := agent.MessagesSnapshot()
+	if len(messages) != 1 || messages[0].Type != llm.System {
+		t.Fatalf("messages = %#v, want system only", messages)
+	}
+}
+
 func TestAgentChainsConfigAndAgentHooks(t *testing.T) {
 	client := &fakeChatClient{
 		responses: []*llm.ChatResponse{{
@@ -533,6 +567,22 @@ type fakeChatClient struct {
 	requests   []llm.ChatRequest
 	contexts   []context.Context
 	onComplete func(llm.ChatRequest, llm.CompletionHooks)
+}
+
+type guardrailStreamingClient struct{}
+
+func (guardrailStreamingClient) Complete(_ context.Context, _ llm.ChatRequest, hooks llm.CompletionHooks) (*llm.ChatResponse, error) {
+	if err := hooks.EmitContentDeltaEvent("safe "); err != nil {
+		return nil, err
+	}
+	if err := hooks.EmitContentDeltaEvent("blocked"); err != nil {
+		return nil, err
+	}
+	return &llm.ChatResponse{Content: "safe blocked"}, nil
+}
+
+func (guardrailStreamingClient) ListModels(context.Context) ([]string, error) {
+	return nil, nil
 }
 
 func (c *fakeChatClient) Complete(ctx context.Context, request llm.ChatRequest, hooks llm.CompletionHooks) (*llm.ChatResponse, error) {
