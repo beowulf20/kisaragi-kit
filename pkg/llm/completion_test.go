@@ -520,6 +520,8 @@ func TestCompletionEmitsAndAggregatesUsage(t *testing.T) {
 }
 
 func TestCompletionAggregatesUsageAcrossToolCallRounds(t *testing.T) {
+	firstCost := 0.01
+	secondCost := 0.02
 	tools := llmtool.NewToolbox()
 	if err := tools.RegisterTool(llmtool.NewTool("greet", "Greets.", func(_ context.Context, _ struct{}) (struct {
 		Greeting string `json:"greeting"`
@@ -539,6 +541,7 @@ func TestCompletionAggregatesUsageAcrossToolCallRounds(t *testing.T) {
 					PromptTokens:     1,
 					CompletionTokens: 2,
 					TotalTokens:      3,
+					CostUSD:          &firstCost,
 					PromptTokenDetails: map[string]int64{
 						"cached_tokens": 4,
 					},
@@ -550,6 +553,7 @@ func TestCompletionAggregatesUsageAcrossToolCallRounds(t *testing.T) {
 					PromptTokens:     10,
 					CompletionTokens: 20,
 					TotalTokens:      30,
+					CostUSD:          &secondCost,
 					CompletionTokenDetails: map[string]int64{
 						"reasoning_tokens": 5,
 					},
@@ -570,11 +574,23 @@ func TestCompletionAggregatesUsageAcrossToolCallRounds(t *testing.T) {
 	if output.Usage.PromptTokens != 11 || output.Usage.CompletionTokens != 22 || output.Usage.TotalTokens != 33 {
 		t.Fatalf("usage = %#v, want aggregate 11/22/33", output.Usage)
 	}
+	if output.Usage.CostUSD == nil || *output.Usage.CostUSD != 0.03 {
+		t.Fatalf("usage cost = %v, want 0.03", output.Usage.CostUSD)
+	}
 	if output.Usage.PromptTokenDetails["cached_tokens"] != 4 || output.Usage.CompletionTokenDetails["reasoning_tokens"] != 5 {
 		t.Fatalf("usage details = %#v %#v", output.Usage.PromptTokenDetails, output.Usage.CompletionTokenDetails)
 	}
 	if len(output.UsageEvents) != 2 || output.UsageEvents[0].Round != 0 || output.UsageEvents[1].Round != 1 {
 		t.Fatalf("usage events = %#v, want two rounds", output.UsageEvents)
+	}
+	if output.UsageEvents[0].Usage.CostUSD == nil || *output.UsageEvents[0].Usage.CostUSD != 0.01 ||
+		output.UsageEvents[1].Usage.CostUSD == nil || *output.UsageEvents[1].Usage.CostUSD != 0.02 {
+		t.Fatalf("usage event costs = %#v, want 0.01 and 0.02", output.UsageEvents)
+	}
+	if output.Usage.CostUSD == output.UsageEvents[0].Usage.CostUSD ||
+		output.Usage.CostUSD == output.UsageEvents[1].Usage.CostUSD ||
+		output.UsageEvents[0].Usage.CostUSD == output.UsageEvents[1].Usage.CostUSD {
+		t.Fatal("usage costs alias across aggregate or events")
 	}
 }
 

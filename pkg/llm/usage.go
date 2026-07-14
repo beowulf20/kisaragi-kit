@@ -12,6 +12,8 @@ type TokenUsage struct {
 	PromptTokenDetails map[string]int64
 	// CompletionTokenDetails contains provider-specific output token details.
 	CompletionTokenDetails map[string]int64
+	// CostUSD is the provider-reported cost in US dollars, or nil when unavailable.
+	CostUSD *float64
 }
 
 func (usage *TokenUsage) add(other TokenUsage) {
@@ -23,11 +25,22 @@ func (usage *TokenUsage) add(other TokenUsage) {
 	usage.TotalTokens += other.TotalTokens
 	usage.PromptTokenDetails = addTokenDetails(usage.PromptTokenDetails, other.PromptTokenDetails)
 	usage.CompletionTokenDetails = addTokenDetails(usage.CompletionTokenDetails, other.CompletionTokenDetails)
+	if other.CostUSD != nil {
+		if usage.CostUSD == nil {
+			total := 0.0
+			usage.CostUSD = &total
+		}
+		*usage.CostUSD += *other.CostUSD
+	}
 }
 
 func (usage TokenUsage) clone() TokenUsage {
 	usage.PromptTokenDetails = cloneTokenDetails(usage.PromptTokenDetails)
 	usage.CompletionTokenDetails = cloneTokenDetails(usage.CompletionTokenDetails)
+	if usage.CostUSD != nil {
+		cost := *usage.CostUSD
+		usage.CostUSD = &cost
+	}
 	return usage
 }
 
