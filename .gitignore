@@ -5,3 +5,5 @@ dist/
 coverage.out
 .codex/**
 .brooks*.json
+todo/PLAN_*.md
+todo/done/
