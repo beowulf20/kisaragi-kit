@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
+	openaisdk "github.com/openai/openai-go/v3"
 )
 
 func TestOpenAIMessageSupportsToolResultMessages(t *testing.T) {
@@ -63,7 +64,7 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`,
 			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}`,
 			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
-			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"prompt_tokens_details":{"cached_tokens":4,"audio_tokens":2},"completion_tokens_details":{"reasoning_tokens":7,"audio_tokens":3,"accepted_prediction_tokens":5,"rejected_prediction_tokens":6}}}`,
+			`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"cost":0.0123,"prompt_tokens_details":{"cached_tokens":4,"audio_tokens":2},"completion_tokens_details":{"reasoning_tokens":7,"audio_tokens":3,"accepted_prediction_tokens":5,"rejected_prediction_tokens":6}}}`,
 		} {
 			fmt.Fprintf(w, "data: %s\n\n", data)
 		}
@@ -109,6 +110,9 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	if output.Usage.PromptTokens != 10 || output.Usage.CompletionTokens != 20 || output.Usage.TotalTokens != 30 {
 		t.Fatalf("usage = %#v, want 10/20/30", output.Usage)
 	}
+	if output.Usage.CostUSD == nil || *output.Usage.CostUSD != 0.0123 {
+		t.Fatalf("usage cost = %v, want 0.0123", output.Usage.CostUSD)
+	}
 	if output.Usage.PromptTokenDetails["cached_tokens"] != 4 || output.Usage.PromptTokenDetails["audio_tokens"] != 2 {
 		t.Fatalf("prompt usage details = %#v", output.Usage.PromptTokenDetails)
 	}
@@ -129,6 +133,55 @@ func TestClientCompleteStreamsContentDeltas(t *testing.T) {
 	}
 	if !strings.Contains(requestBody, `"provider_option":{"mode":"custom"}`) {
 		t.Fatalf("request missing extra provider field:\n%s", requestBody)
+	}
+}
+
+func TestCostFromUsageRawJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantNil bool
+		want    float64
+	}{
+		{name: "cost", raw: `{"cost":0.01}`, want: 0.01},
+		{name: "cost wins", raw: `{"cost":0.01,"total_cost":0.02}`, want: 0.01},
+		{name: "zero cost wins", raw: `{"cost":0,"total_cost":0.02}`, want: 0},
+		{name: "total cost fallback", raw: `{"total_cost":0.02}`, want: 0.02},
+		{name: "null cost fallback", raw: `{"cost":null,"total_cost":0.02}`, want: 0.02},
+		{name: "string cost fallback", raw: `{"cost":"0.01","total_cost":0.02}`, want: 0.02},
+		{name: "non-finite cost fallback", raw: `{"cost":1e999,"total_cost":0.02}`, want: 0.02},
+		{name: "missing", raw: `{}`, wantNil: true},
+		{name: "null", raw: `{"cost":null}`, wantNil: true},
+		{name: "non numeric", raw: `{"cost":"0.01"}`, wantNil: true},
+		{name: "malformed", raw: `{"cost":`, wantNil: true},
+		{name: "empty", raw: "", wantNil: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := costFromUsageRawJSON(tt.raw)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("cost = %v, want nil", *got)
+				}
+				return
+			}
+			if got == nil || *got != tt.want {
+				t.Fatalf("cost = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompletionUsageKeepsCostWithoutTokens(t *testing.T) {
+	var usage openaisdk.CompletionUsage
+	if err := json.Unmarshal([]byte(`{"cost":0}`), &usage); err != nil {
+		t.Fatal(err)
+	}
+
+	got := completionUsage(usage, "")
+	if got == nil || got.CostUSD == nil || *got.CostUSD != 0 {
+		t.Fatalf("usage = %#v, want explicit zero cost", got)
 	}
 }
 

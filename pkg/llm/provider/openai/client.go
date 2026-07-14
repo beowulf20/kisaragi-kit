@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -93,7 +94,7 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 		params.ToolChoice = openaisdk.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openaisdk.Opt("auto")}
 	}
 
-	completion, reasoning, err := c.streamingChatCompletion(ctx, params, hooks)
+	completion, reasoning, usageRaw, err := c.streamingChatCompletion(ctx, params, hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +106,7 @@ func (c *Client) Complete(ctx context.Context, request llm.ChatRequest, hooks ll
 	response := &llm.ChatResponse{
 		Content:   message.Content,
 		Reasoning: reasoning,
-		Usage:     completionUsage(completion.Usage),
+		Usage:     completionUsage(completion.Usage, usageRaw),
 	}
 	if response.Reasoning == "" {
 		response.Reasoning = reasoningTextFromCompletionRaw(completion.RawJSON())
@@ -134,8 +135,12 @@ func cloneExtraFields(fields map[string]any) map[string]any {
 	return cloned
 }
 
-func completionUsage(usage openaisdk.CompletionUsage) *llm.TokenUsage {
-	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+func completionUsage(usage openaisdk.CompletionUsage, raw string) *llm.TokenUsage {
+	if raw == "" {
+		raw = usage.RawJSON()
+	}
+	costUSD := costFromUsageRawJSON(raw)
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 && costUSD == nil {
 		return nil
 	}
 
@@ -143,6 +148,7 @@ func completionUsage(usage openaisdk.CompletionUsage) *llm.TokenUsage {
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
+		CostUSD:          costUSD,
 	}
 	result.PromptTokenDetails = tokenDetails(map[string]int64{
 		"audio_tokens":  usage.PromptTokensDetails.AudioTokens,
@@ -155,6 +161,24 @@ func completionUsage(usage openaisdk.CompletionUsage) *llm.TokenUsage {
 		"rejected_prediction_tokens": usage.CompletionTokensDetails.RejectedPredictionTokens,
 	})
 	return result
+}
+
+func costFromUsageRawJSON(raw string) *float64 {
+	if raw == "" || !gjson.Valid(raw) {
+		return nil
+	}
+	for _, path := range []string{"cost", "total_cost"} {
+		value := gjson.Get(raw, path)
+		if !value.Exists() || value.Type != gjson.Number {
+			continue
+		}
+		cost := value.Float()
+		if math.IsInf(cost, 0) || math.IsNaN(cost) {
+			continue
+		}
+		return &cost
+	}
+	return nil
 }
 
 func tokenDetails(values map[string]int64) map[string]int64 {
@@ -188,22 +212,26 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, string, error) {
+func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.ChatCompletionNewParams, hooks llm.CompletionHooks) (*openaisdk.ChatCompletion, string, string, error) {
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 	defer func() { _ = stream.Close() }()
 	acc := openaisdk.ChatCompletionAccumulator{}
 	var reasoning strings.Builder
+	var usageRaw string
 
 	for stream.Next() {
 		chunk := stream.Current()
 		if !acc.AddChunk(chunk) {
-			return nil, "", errors.New("chat completion stream accumulation failed")
+			return nil, "", "", errors.New("chat completion stream accumulation failed")
+		}
+		if raw := chunk.Usage.RawJSON(); costFromUsageRawJSON(raw) != nil {
+			usageRaw = raw
 		}
 
 		for _, delta := range reasoningDeltasFromChunkRaw(chunk.RawJSON()) {
 			reasoning.WriteString(delta)
 			if err := hooks.EmitReasoningDelta(delta); err != nil {
-				return nil, "", err
+				return nil, "", "", err
 			}
 		}
 		if reasoning.Len() == 0 {
@@ -213,16 +241,16 @@ func (c *Client) streamingChatCompletion(ctx context.Context, params openaisdk.C
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				if err := hooks.EmitContentDeltaEvent(choice.Delta.Content); err != nil {
-					return nil, "", err
+					return nil, "", "", err
 				}
 			}
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
-	return &acc.ChatCompletion, reasoning.String(), nil
+	return &acc.ChatCompletion, reasoning.String(), usageRaw, nil
 }
 
 func reasoningDeltasFromChunkRaw(raw string) []string {
