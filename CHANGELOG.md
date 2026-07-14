@@ -9,6 +9,17 @@
 * **guardrail:** add attachable tool-metadata leakage matcher
 * **tool:** add central policy hooks and validated approval flow
 
+## [1.9.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.8.1...v1.9.0) (2026-07-14)
+
+
+### Features
+
+* **example:** show usage cost breakdown ([3984c16](https://github.com/beowulf20/kisaragi-kit/commit/3984c1642839ea9d282a0dd568a399d38f5b1f10))
+* **llm:** add configurable safety guardrails ([04a3945](https://github.com/beowulf20/kisaragi-kit/commit/04a3945644fa5b623d413fd1b1665493727cd931))
+* **llm:** preserve provider-reported usage cost ([bda197c](https://github.com/beowulf20/kisaragi-kit/commit/bda197c24bc751e026e546c5f886df289683fdf8))
+* **openai:** capture provider-reported usage cost ([902ee88](https://github.com/beowulf20/kisaragi-kit/commit/902ee881558b0359dc3156b107cd94265272bcd4))
+* **openrouter:** add typed provider routing controls ([a6526dd](https://github.com/beowulf20/kisaragi-kit/commit/a6526dd52a668df2f8fb00355afc7c37485e3d98))
+
 ## [1.8.1](https://github.com/beowulf20/kisaragi-kit/compare/v1.8.0...v1.8.1) (2026-07-01)
 
 
