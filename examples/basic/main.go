@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -22,6 +24,9 @@ type weatherOutput struct {
 }
 
 func main() {
+	printCost := flag.Bool("print-cost", false, "print the provider-reported USD cost")
+	flag.Parse()
+
 	client, _, err := openaiadapter.NewClient(openaiadapter.ClientConfig{
 		BaseURL: getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
 		APIKey:  os.Getenv("OPENAI_API_KEY"),
@@ -67,7 +72,41 @@ func main() {
 	}
 	if output.Content == "" {
 		fmt.Println()
+	} else if *printCost {
+		fmt.Println()
 	}
+	if *printCost {
+		printCostBreakdown(os.Stdout, output)
+	}
+}
+
+func printCostBreakdown(w io.Writer, output *llm.CompletionCallOutput) {
+	fmt.Fprintln(w, "Cost breakdown:")
+	for index, event := range output.UsageEvents {
+		fmt.Fprintf(w, "  Generation %d: model=%s round=%d attempt=%d prompt=%d completion=%d total=%d cost=%s\n",
+			index+1,
+			event.Model,
+			event.Round,
+			event.Attempt,
+			event.Usage.PromptTokens,
+			event.Usage.CompletionTokens,
+			event.Usage.TotalTokens,
+			formatCost(event.Usage.CostUSD),
+		)
+	}
+	fmt.Fprintf(w, "  Total: prompt=%d completion=%d total=%d cost=%s\n",
+		output.Usage.PromptTokens,
+		output.Usage.CompletionTokens,
+		output.Usage.TotalTokens,
+		formatCost(output.Usage.CostUSD),
+	)
+}
+
+func formatCost(cost *float64) string {
+	if cost == nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("$%.8f", *cost)
 }
 
 func getenv(key, fallback string) string {
