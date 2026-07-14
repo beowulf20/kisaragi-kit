@@ -30,6 +30,7 @@ go get github.com/beowulf20/kisaragi-kit
 | `pkg/llm/agent` | Stateful agents with persistent messages, transient runs, streaming hooks, and `AsTool()` delegation. |
 | `pkg/llm/guardrail` | Attachable message guardrails for system-prompt and internal tool-metadata leaks. |
 | `pkg/llm/provider/openai` | OpenAI-compatible client adapter, streaming conversion, model listing, and tool/message translation. |
+| `pkg/llm/provider/openrouter` | Typed OpenRouter client configuration and client-wide provider routing controls. |
 
 ## Quickstart
 
@@ -119,6 +120,40 @@ For OpenAI-compatible local servers:
 ```bash
 OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=local OPENAI_MODEL=llama3.1 go run ./examples/basic
 ```
+
+### Restrict OpenRouter providers
+
+Use the typed OpenRouter wrapper for client-wide provider routing:
+
+```go
+import openrouteradapter "github.com/beowulf20/kisaragi-kit/pkg/llm/provider/openrouter"
+
+allowFallbacks := false
+client, _, err := openrouteradapter.NewClient(openrouteradapter.ClientConfig{
+	APIKey: os.Getenv("OPENROUTER_API_KEY"),
+	Provider: openrouteradapter.ProviderPreferences{
+		Only:           []string{"deepinfra", "alibaba"},
+		Order:          []string{"deepinfra", "alibaba"},
+		AllowFallbacks: &allowFallbacks,
+	},
+})
+```
+
+`Only` is the strict allowlist. `Order` controls priority but does not restrict other providers by itself. Set `AllowFallbacks` to `false` when an ordered route must not fall back outside its configured policy. Invalid blank slugs, allow/deny overlap, and contradictory order entries fail during client creation; model/provider availability errors still come from OpenRouter at completion time.
+
+Advanced routing fields stay available without expanding the typed API:
+
+```go
+Provider: openrouteradapter.ProviderPreferences{
+	Only:       []string{"deepinfra"},
+	ExtraFields: map[string]any{"zdr": true},
+},
+ChatCompletionExtraFields: map[string]any{
+	"models": []string{"deepseek/deepseek-v4-flash"},
+},
+```
+
+Typed keys cannot be redefined through raw maps. OpenRouter account-wide allowed/ignored-provider settings can provide an additional external baseline; see [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection).
 
 Run the human-approval example:
 
@@ -315,6 +350,7 @@ The test suite covers schema generation, typed tool calls, streaming content, to
 - Reasoning effort can be set with `CompletionCallInput.ReasoningEffort` for models/providers that support it. Unsupported providers or models may ignore it.
 - `ChatResponse.Reasoning` is empty when the provider does not report reasoning. `OnReasoningDelta` fires only when the adapter extracts streamed reasoning fields.
 - Provider-specific chat completion fields can be configured through `openai.ClientConfig.ChatCompletionExtraFields`.
+- OpenRouter provider restrictions can be configured through typed `openrouter.ClientConfig.Provider` preferences without changing the generic OpenAI adapter.
 - Tool execution is capped by `CompletionCallInput.MaxToolCallRounds` to prevent infinite loops.
 - Aggregate provider attempts, total tool calls, repeated identical calls, and approval denials have configurable completion limits (defaults: 32, 64, 4, and 3). `MaxTotalTokens` is optional because some providers omit usage.
 - Tool approval is metadata on `llmtool.Tool`; handlers stay ordinary Go functions, and `Toolbox.Call` owns enforcement.
