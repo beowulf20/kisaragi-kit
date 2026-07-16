@@ -152,8 +152,18 @@ func (tb *Toolbox) CallWithRequest(ctx context.Context, request ToolCallRequest)
 	if err != nil {
 		return CallOutput{Approval: approval}, err
 	}
-	result, err := tool.Call(ctx, prepared)
+	result, err := callToolSafely(ctx, tool, prepared)
 	return CallOutput{Result: result, Approval: approval}, err
+}
+
+func callToolSafely(ctx context.Context, tool Tool, arguments json.RawMessage) (result *string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			err = fmt.Errorf("tool %q panicked: %v", tool.Name, recovered)
+		}
+	}()
+	return tool.Call(ctx, arguments)
 }
 
 // ChatTool is the provider-neutral schema exposed to chat clients.

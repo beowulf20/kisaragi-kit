@@ -622,6 +622,23 @@ func TestToolboxPolicyDeniesBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestToolboxRecoversToolPanic(t *testing.T) {
+	toolbox := NewToolbox()
+	if err := toolbox.RegisterTool(NewTool("unstable", "Panics.", func(context.Context, struct{}) (struct{}, error) {
+		panic("boom")
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := toolbox.Call(context.Background(), "unstable", `{}`)
+	if err == nil || !strings.Contains(err.Error(), `tool "unstable" panicked: boom`) {
+		t.Fatalf("expected recovered tool panic, got result=%v err=%v", result, err)
+	}
+	if result != nil {
+		t.Fatalf("result = %v, want nil", result)
+	}
+}
+
 func TestToolboxValidatesArgumentsBeforePolicyAndApproval(t *testing.T) {
 	policyCalled := false
 	approvalCalled := false

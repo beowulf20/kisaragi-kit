@@ -147,6 +147,24 @@ const (
 	DefaultProviderErrorRetries = 2
 )
 
+// ErrMaxToolCallRoundsExceeded identifies completion termination after the
+// configured number of consecutive tool-call rounds is exhausted.
+var ErrMaxToolCallRoundsExceeded = errors.New("maximum tool call rounds exceeded")
+
+// MaxToolCallRoundsError reports the configured tool-call round limit.
+type MaxToolCallRoundsError struct {
+	MaxRounds int
+}
+
+func (err *MaxToolCallRoundsError) Error() string {
+	return fmt.Sprintf("exceeded %d tool call rounds", err.MaxRounds)
+}
+
+// Unwrap allows callers to use errors.Is with ErrMaxToolCallRoundsExceeded.
+func (err *MaxToolCallRoundsError) Unwrap() error {
+	return ErrMaxToolCallRoundsExceeded
+}
+
 // Completion runs a chat completion, executing requested tools until final text.
 func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 	if err := input.Validate(); err != nil {
@@ -243,7 +261,9 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 		}
 
 		if round == maxToolCallRounds {
-			return nil, fmt.Errorf("exceeded %d tool call rounds", maxToolCallRounds)
+			output.Content = response.Content
+			output.appendAssistantResponseMessage(response)
+			return output, &MaxToolCallRoundsError{MaxRounds: maxToolCallRounds}
 		}
 
 		assistantToolCalls := append([]ToolCall(nil), response.ToolCalls...)
@@ -345,7 +365,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("exceeded %d tool call rounds", maxToolCallRounds)
+	return output, &MaxToolCallRoundsError{MaxRounds: maxToolCallRounds}
 }
 
 func (input CompletionCallInput) evaluateMessage(

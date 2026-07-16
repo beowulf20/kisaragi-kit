@@ -744,14 +744,27 @@ func TestCompletionUsesConfiguredMaxToolCallRounds(t *testing.T) {
 		},
 	}
 
-	_, err := Completion(CompletionCallInput{
+	output, err := Completion(CompletionCallInput{
 		Client:            client,
 		Model:             "test-model",
 		Messages:          []Message{NewUserMessage("call tools")},
 		MaxToolCallRounds: 1,
 	})
-	if err == nil || !strings.Contains(err.Error(), "exceeded 1 tool call rounds") {
+	if err == nil || !errors.Is(err, ErrMaxToolCallRoundsExceeded) {
 		t.Fatalf("expected max rounds error, got %v", err)
+	}
+	var maxRoundsErr *MaxToolCallRoundsError
+	if !errors.As(err, &maxRoundsErr) || maxRoundsErr.MaxRounds != 1 {
+		t.Fatalf("max rounds error = %#v, want limit 1", maxRoundsErr)
+	}
+	if output == nil {
+		t.Fatal("output is nil, want partial completion output")
+	}
+	if len(output.Messages) != 3 {
+		t.Fatalf("messages = %d, want first tool request, tool error, and final tool request", len(output.Messages))
+	}
+	if got := output.Messages[len(output.Messages)-1].ToolCalls; len(got) != 1 || got[0].ID != "call_2" {
+		t.Fatalf("final partial tool calls = %#v, want call_2", got)
 	}
 	if len(client.requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(client.requests))
