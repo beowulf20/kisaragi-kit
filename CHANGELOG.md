@@ -9,6 +9,14 @@
 * **guardrail:** add attachable tool-metadata leakage matcher
 * **tool:** add central policy hooks and validated approval flow
 
+## [1.9.1](https://github.com/beowulf20/kisaragi-kit/compare/v1.9.0...v1.9.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **llm:** preserve output on runtime failures ([58b413d](https://github.com/beowulf20/kisaragi-kit/commit/58b413d9cb02d346b168ed46c64947bcb1f39ad9))
+* **llm:** preserve output on runtime failures ([9754f6b](https://github.com/beowulf20/kisaragi-kit/commit/9754f6b9b6a52ca5e99f4ac76bae755ece94d3d0))
+
 ## [1.9.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.8.1...v1.9.0) (2026-07-14)
 
 
