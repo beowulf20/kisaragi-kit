@@ -452,6 +452,62 @@ Caller context cancellation or expiry now stops further provider attempts for
 both observed and unobserved calls. Provider-local timeout errors still follow
 the configured retry policy while the caller context is active.
 
+### Complex OpenRouter agent example
+
+`examples/progress-openrouter` uses the real OpenRouter adapter for a coordinator
+that delegates to researcher and analyst agents through `AsTool()`. The researcher
+reads a local demo sensor supplier catalog; the analyst calculates delivered
+quotes with stock checks and integer cents. Tool handlers report verified
+milestones before the coordinator writes its recommendation. Supplier data and
+prices are fixtures, not live business integrations.
+
+```bash
+export OPENROUTER_API_KEY='your-key'
+export OPENROUTER_MODEL='provider/your-tool-capable-model'
+go run ./examples/progress-openrouter \
+  -task 'Compare demo suppliers for 10 sensors and recommend the cheapest available option.' \
+  -status-interval 1s -timeout 3m
+```
+
+Choose a model that supports tool calling. The example requests
+`provider.require_parameters=true`; optional `OPENROUTER_BASE_URL` overrides the
+default OpenRouter endpoint. Real runs use your account and may incur charges;
+the number and order of delegations depend on the selected model. Each agent has
+tool-round, provider-attempt, and tool-call limits; Ctrl+C and the overall timeout
+cancel the workflow.
+
+An independent status loop prints changed snapshots for each role. `tools=2/0`
+means two successful calls and zero failed calls; counts reflect retained tool
+outcomes, not a percentage. Observer callbacks only update trackers and signal a
+bounded channel, so terminal output never runs inside the callback. Every child
+run has its own RunID/tracker; repeated delegations replace only that role's
+latest tracker. Memory stays bounded to three roles and their configured snapshot
+tails. The coordinator's snapshot does not merge child milestones. Final output
+includes separate snapshots even on failure; it never queries a busy agent for
+status. These are technical diagnostics, not ready-to-send customer messages.
+
+The integration tests use a **local HTTP SSE fixture through the actual OpenRouter
+adapter**, checking delegation, tool transcripts, live status while the provider
+is gated, repeated-run routing, failures, and cancellation. They need no API key
+or paid calls; passing them does not establish live model behavior:
+
+```bash
+go test -v ./examples/progress-openrouter
+```
+
+Model answers are written as UTF-8. If a Windows PowerShell console displays
+symbols such as `ÔÇö` or `┬ó`, select UTF-8 before running the example:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+go run ./examples/progress-openrouter
+```
+
+This configures the current console's output code page; see
+[Console.OutputEncoding](https://learn.microsoft.com/en-us/dotnet/api/system.console.outputencoding).
+The example reads process environment variables; `.env` files must be loaded by
+your shell or environment runner. Never commit credentials or live-run logs.
+
 ## Tests
 
 ```bash
