@@ -28,6 +28,8 @@ type CompletionCallInput struct {
 	Tools llmtool.Toolbox
 	// Hooks receives streaming content and tool execution events.
 	Hooks CompletionHooks
+	// ProgressObserver receives non-abortable lifecycle metadata and explicit milestones.
+	ProgressObserver ProgressObserver
 	// MessageGuardrails inspect messages and streamed assistant candidates before they advance.
 	MessageGuardrails []MessageGuardrail
 	// ToolErrorInterceptor can rewrite tool error feedback or abort on tool failure.
@@ -166,7 +168,7 @@ func (err *MaxToolCallRoundsError) Unwrap() error {
 }
 
 // Completion runs a chat completion, executing requested tools until final text.
-func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
+func Completion(input CompletionCallInput) (result *CompletionCallOutput, resultErr error) {
 	if err := input.Validate(); err != nil {
 		return nil, err
 	}
@@ -178,6 +180,12 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// A delegated completion must not inherit its parent's tool milestone scope.
+	if inherited, _ := ctx.Value(progressContextKey{}).(*progressSpan); inherited != nil {
+		ctx = context.WithValue(ctx, progressContextKey{}, (*progressSpan)(nil))
+	}
+	progress := startRunProgress(input.ProgressObserver)
+	defer progress.finish(&resultErr)
 	messages := append([]Message(nil), input.Messages...)
 	output := &CompletionCallOutput{}
 	tools := input.Tools.ChatTools()
@@ -200,7 +208,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			ReasoningEffort: input.ReasoningEffort,
 			Tools:           tools,
 		}
-		response, attempt, streamState, err := completeWithProviderRetries(ctx, input, request, providerErrorRetries, round, budget)
+		response, attempt, streamState, err := completeWithProviderRetries(ctx, input, request, providerErrorRetries, round, budget, progress)
 		if err != nil {
 			if errors.Is(err, ErrMessageGuardrailBlocked) {
 				if streamState != nil {
@@ -283,13 +291,15 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				return output, fmt.Errorf("chat completion aborted: %w", err)
 			}
 
-			callOutput, err := input.Tools.CallWithRequest(ctx, llmtool.ToolCallRequest{
+			toolContext := progress.startTool(ctx, call)
+			callOutput, err := input.Tools.CallWithRequest(toolContext, llmtool.ToolCallRequest{
 				ID:        toolCall.ID,
 				Name:      toolCall.Name,
 				Arguments: toolCall.Arguments,
 				Round:     round,
 				Model:     input.Model,
 			})
+			progress.toolReturned(err)
 			if err != nil {
 				if errors.Is(err, llmtool.ErrToolPolicyDenied) {
 					return output, fmt.Errorf("tool %q blocked: %w", toolCall.Name, err)
@@ -320,9 +330,11 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
 					return output, guardrailErr
 				}
+				progress.finishTool()
 				continue
 			}
 			if callOutput.Result == nil {
+				progress.invalidToolResult()
 				err := fmt.Errorf("tool %q returned nil result", toolCall.Name)
 				if hookErr := input.Hooks.EmitToolErrorEvent(round, call, err); hookErr != nil {
 					return output, fmt.Errorf("chat completion aborted: %w", hookErr)
@@ -345,6 +357,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 				if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
 					return output, guardrailErr
 				}
+				progress.finishTool()
 				continue
 			}
 
@@ -362,6 +375,7 @@ func Completion(input CompletionCallInput) (*CompletionCallOutput, error) {
 			if guardrailErr := input.appendApprovalDecisionMessage(ctx, output, callOutput.Approval, messages, round, attempt); guardrailErr != nil {
 				return output, guardrailErr
 			}
+			progress.finishTool()
 		}
 	}
 
@@ -516,10 +530,13 @@ type messageGuardrailStreamState struct {
 	reasoningCallbackHandled bool
 }
 
-func completeWithProviderRetries(ctx context.Context, input CompletionCallInput, request ChatRequest, retries int, round int, budget *completionBudgetState) (*ChatResponse, int, *messageGuardrailStreamState, error) {
+func completeWithProviderRetries(ctx context.Context, input CompletionCallInput, request ChatRequest, retries int, round int, budget *completionBudgetState, progress *runProgress) (*ChatResponse, int, *messageGuardrailStreamState, error) {
 	var lastErr error
 	var lastState *messageGuardrailStreamState
 	for attempt := 0; attempt <= retries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, attempt, lastState, err
+		}
 		if err := budget.consumeProviderAttempt(); err != nil {
 			return nil, attempt, lastState, err
 		}
@@ -530,6 +547,7 @@ func completeWithProviderRetries(ctx context.Context, input CompletionCallInput,
 			MessageCount:       len(request.Messages),
 			AvailableToolCount: len(request.Tools),
 		}
+		progress.startGeneration(round, attempt)
 		if err := input.Hooks.EmitGenerationStartEvent(start); err != nil {
 			return nil, attempt, nil, err
 		}
@@ -537,7 +555,11 @@ func completeWithProviderRetries(ctx context.Context, input CompletionCallInput,
 		state := &messageGuardrailStreamState{}
 		lastState = state
 		streamHooks := input.guardedStreamHooks(ctx, request.Messages, round, attempt, state)
-		response, err := input.Client.Complete(ctx, request, streamHooks)
+		var response *ChatResponse
+		err := ctx.Err()
+		if err == nil {
+			response, err = input.Client.Complete(ctx, request, streamHooks)
+		}
 		if err == nil && state.terminal != nil {
 			err = state.terminal
 		}
@@ -554,8 +576,10 @@ func completeWithProviderRetries(ctx context.Context, input CompletionCallInput,
 				end.ToolCallCount = len(response.ToolCalls)
 			}
 			if err := input.Hooks.EmitGenerationEndEvent(end); err != nil {
+				progress.finishGeneration(err, response == nil)
 				return response, attempt, state, err
 			}
+			progress.finishGeneration(nil, response == nil)
 			return response, attempt, state, nil
 		}
 		endErr := input.Hooks.EmitGenerationEndEvent(GenerationEndEvent{
@@ -567,12 +591,20 @@ func completeWithProviderRetries(ctx context.Context, input CompletionCallInput,
 			Err:                err,
 		})
 		if endErr != nil {
+			progress.finishGeneration(endErr, false)
 			return nil, attempt, state, endErr
 		}
+		progress.finishGeneration(err, false)
 		if errors.Is(err, ErrCompletionEventAborted) || errors.Is(err, ErrMessageGuardrailBlocked) {
 			return nil, attempt, state, err
 		}
 		input.Hooks.EmitCallError(err)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if errors.Is(err, contextErr) {
+				return nil, attempt, state, err
+			}
+			return nil, attempt, state, contextErr
+		}
 		lastErr = err
 	}
 	return nil, retries, lastState, lastErr
