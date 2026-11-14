@@ -456,18 +456,29 @@ the configured retry policy while the caller context is active.
 
 `examples/progress-openrouter` uses the real OpenRouter adapter for a coordinator
 that delegates to researcher and analyst agents through `AsTool()`. The researcher
-reads a local demo sensor supplier catalog; the analyst calculates delivered
-quotes with stock checks and integer cents. Tool handlers report verified
-milestones before the coordinator writes its recommendation. Supplier data and
-prices are fixtures, not live business integrations.
+checks the catalog, each supplier's stock, and delivery deadlines. The analyst
+calculates per-supplier quotes, compares quantity scenarios, then audits the
+primary recommendation's stock, delivery, exact total, and cheapest eligible
+selection. Supplier data and prices are local fixtures, not live integrations.
+
+The default task orders 10 sensors under a seven-day deadline and compares
+quantities 10, 20, and 30. Its six tools complete 16 verified-check milestones,
+including negative findings such as a supplier missing the deadline. An audit
+must return `approved=true` before a recommendation can be described as approved.
 
 ```bash
 export OPENROUTER_API_KEY='your-key'
 export OPENROUTER_MODEL='provider/your-tool-capable-model'
 go run ./examples/progress-openrouter \
-  -task 'Compare demo suppliers for 10 sensors and recommend the cheapest available option.' \
-  -status-interval 1s -timeout 3m
+  -status-interval 1s -step-delay 2s -timeout 3m
 ```
+
+Each completed local demo check uses two seconds of simulated backend latency
+by default, making intermediate updates visible. Combined with model calls, the
+default scenario targets roughly one to two minutes; actual model latency varies.
+`-step-delay 0s` removes simulated latency for fast runs/tests. All pacing waits
+honor cancellation. A custom `-task` should specify the primary quantity, delivery
+deadline, and scenario quantities.
 
 Choose a model that supports tool calling. The example requests
 `provider.require_parameters=true`; optional `OPENROUTER_BASE_URL` overrides the
@@ -478,7 +489,11 @@ cancel the workflow.
 
 An independent status loop prints changed snapshots for each role. `tools=2/0`
 means two successful calls and zero failed calls; counts reflect retained tool
-outcomes, not a percentage. Observer callbacks only update trackers and signal a
+outcomes, not a percentage. STATUS lines show elapsed time, milestone count, and
+the latest verified milestone; final snapshots retain the milestone tail. During
+quiet status ticks, HEARTBEAT lines say `still_running` and show the current stage
+and unchanged Version. Heartbeats do not invent milestones, update UpdatedAt,
+or emit output for finished runs. Observer callbacks only update trackers and signal a
 bounded channel, so terminal output never runs inside the callback. Every child
 run has its own RunID/tracker; repeated delegations replace only that role's
 latest tracker. Memory stays bounded to three roles and their configured snapshot
@@ -487,8 +502,9 @@ includes separate snapshots even on failure; it never queries a busy agent for
 status. These are technical diagnostics, not ready-to-send customer messages.
 
 The integration tests use a **local HTTP SSE fixture through the actual OpenRouter
-adapter**, checking delegation, tool transcripts, live status while the provider
-is gated, repeated-run routing, failures, and cancellation. They need no API key
+adapter**, checking the eleven-request workflow, sixteen milestones, audited
+facts, status/heartbeats while the provider is gated, repeated-run routing,
+timer cancellation, failures, and zero-delay fast mode. They need no API key
 or paid calls; passing them does not establish live model behavior:
 
 ```bash

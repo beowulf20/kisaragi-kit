@@ -21,11 +21,11 @@ import (
 	llmtool "github.com/beowulf20/kisaragi-kit/pkg/llm/tool"
 )
 
-const defaultTask = "Compare the demo suppliers for 10 sensors. Research the catalog, calculate delivered totals, then recommend the cheapest available supplier. Clearly label all prices as demo data."
+const defaultTask = "Plan a demo order for 10 sensors with a 7-day delivery deadline. Research catalog, stock, and delivery; calculate delivered quotes; compare quantity scenarios 10, 20, and 30 under that deadline; audit the recommended supplier and total for the primary 10-unit order. Present verified findings, scenario tradeoffs, and the audit result. Clearly label all prices and availability as local demo data."
 
 type config struct {
-	apiKey, model, baseURL, task string
-	timeout, statusInterval      time.Duration
+	apiKey, model, baseURL, task       string
+	timeout, statusInterval, stepDelay time.Duration
 }
 
 func main() {
@@ -33,6 +33,7 @@ func main() {
 	flag.StringVar(&cfg.task, "task", defaultTask, "task for the coordinator; tools use demo sensor suppliers")
 	flag.DurationVar(&cfg.timeout, "timeout", 3*time.Minute, "overall workflow timeout")
 	flag.DurationVar(&cfg.statusInterval, "status-interval", time.Second, "interval for changed status snapshots")
+	flag.DurationVar(&cfg.stepDelay, "step-delay", 2*time.Second, "simulated latency per demo check; 0s for fast runs")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	err := run(ctx, cfg, os.Stdout)
@@ -41,60 +42,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-type supplier struct {
-	ID             string `json:"id"`
-	UnitPriceCents int    `json:"unit_price_cents"`
-	ShippingCents  int    `json:"shipping_cents"`
-	Stock          int    `json:"stock"`
-}
-
-var catalog = []supplier{
-	{ID: "north", UnitPriceCents: 2400, ShippingCents: 1200, Stock: 40},
-	{ID: "south", UnitPriceCents: 2300, ShippingCents: 2400, Stock: 30},
-	{ID: "west", UnitPriceCents: 2500, ShippingCents: 0, Stock: 20},
-}
-
-type catalogInput struct {
-	Category string `json:"category" description:"Demo catalog category: sensor"`
-}
-
-func lookupCatalog(ctx context.Context, input catalogInput) ([]supplier, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if strings.ToLower(strings.TrimSpace(input.Category)) != "sensor" {
-		return nil, errors.New("the demo catalog contains only the sensor category")
-	}
-	llm.ReportMilestone(ctx, "Verified 3 suppliers in the local demo sensor catalog")
-	return append([]supplier(nil), catalog...), nil
-}
-
-type quoteInput struct {
-	Quantity int `json:"quantity" description:"Number of demo sensors, from 1 to 100"`
-}
-
-type quote struct {
-	SupplierID string `json:"supplier_id"`
-	TotalCents int    `json:"total_cents"`
-}
-
-func calculateQuotes(ctx context.Context, input quoteInput) ([]quote, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if input.Quantity < 1 || input.Quantity > 100 {
-		return nil, errors.New("quantity must be between 1 and 100")
-	}
-	var quotes []quote
-	for _, offer := range catalog {
-		if offer.Stock >= input.Quantity {
-			quotes = append(quotes, quote{SupplierID: offer.ID, TotalCents: input.Quantity*offer.UnitPriceCents + offer.ShippingCents})
-		}
-	}
-	llm.ReportMilestone(ctx, fmt.Sprintf("Calculated %d available demo quotes for %d sensors", len(quotes), input.Quantity))
-	return quotes, nil
 }
 
 func newAgent(client llm.ChatClient, model string, tracking *runTracking, name, prompt string, tools ...llmtool.Tool) (*agent.Agent, error) {
@@ -113,50 +60,64 @@ func newAgent(client llm.ChatClient, model string, tracking *runTracking, name, 
 	})
 }
 
-func newCoordinator(client llm.ChatClient, model string, tracking *runTracking) (*agent.Agent, error) {
+func newCoordinator(client llm.ChatClient, model string, tracking *runTracking, stepDelay time.Duration) (*agent.Agent, error) {
+	demo := demoTools{delay: stepDelay}
 	researcher, err := newAgent(client, model, tracking, "researcher",
-		"You are the researcher. Call lookup_catalog with category sensor to verify the local demo suppliers, prices in cents, and stock. Report only tool-backed facts and label them demo data.",
-		llmtool.NewTool("lookup_catalog", "Reads the local demo sensor supplier catalog; no live prices.", lookupCatalog))
+		"You are the researcher. In order, call lookup_catalog with category sensor, check_inventory for the primary order quantity, and check_delivery for the requested deadline. All three checks are required. Report only tool-backed supplier, stock, and delivery facts and label them local demo data.",
+		llmtool.NewTool("lookup_catalog", "Reads the local demo sensor catalog.", demo.lookupCatalog),
+		llmtool.NewTool("check_inventory", "Checks demo stock separately for every supplier.", demo.checkInventory),
+		llmtool.NewTool("check_delivery", "Checks each demo supplier against a delivery deadline.", demo.checkDelivery))
 	if err != nil {
 		return nil, err
 	}
 	analyst, err := newAgent(client, model, tracking, "analyst",
-		"You are the analyst. Call calculate_quotes for the requested quantity. Compare returned delivered totals in cents and recommend the cheapest available option. Label all prices demo data; never invent quotes or availability.",
-		llmtool.NewTool("calculate_quotes", "Computes demo delivered quotes for suppliers with enough stock.", calculateQuotes))
+		"You are the analyst. In order, call calculate_quotes for the primary quantity, evaluate_scenarios for the requested distinct quantities and delivery deadline, then audit_recommendation for your chosen primary-order supplier and exact total. All three tools are required before your final answer. Choose using verified stock, deadline, and total facts; if an audit is not approved, correct the choice and audit again. Label all data demo fixtures, never live quotes.",
+		llmtool.NewTool("calculate_quotes", "Calculates each demo supplier's quote or stock exclusion.", demo.calculateQuotes),
+		llmtool.NewTool("evaluate_scenarios", "Compares up to five quantity scenarios under a delivery deadline.", demo.evaluateScenarios),
+		llmtool.NewTool("audit_recommendation", "Audits demo stock, delivery, proposed total, and cheapest eligible selection.", demo.auditRecommendation))
 	if err != nil {
 		return nil, err
 	}
 	return newAgent(client, model, tracking, "coordinator",
-		"You are the coordinator. Complete the user's demo sensor procurement task. First delegate catalog research to agent_researcher, then pass the findings and requested quantity to agent_analyst for verified calculations. Only then give a concise recommendation with delivered total and caveats. All business data is local demo data, not live supplier information.",
+		"You are the coordinator. First delegate catalog, inventory, and delivery research to agent_researcher. Then pass the findings, primary quantity, scenario quantities, and deadline to agent_analyst for quotes, scenarios, and a recommendation audit. Only after both agents finish, give a concise report with the approved primary recommendation, scenario tradeoffs, and caveats. Never claim an unaudited recommendation is approved. All business data is local demo fixtures, not live supplier information.",
 		researcher.AsTool(), analyst.AsTool())
 }
 
 type namedSnapshot struct {
-	Agent string `json:"agent"`
+	Agent   string `json:"agent"`
+	Elapsed string `json:"elapsed"`
 	progress.Snapshot
+}
+
+type trackedRun struct {
+	tracker           *progress.Tracker
+	started, finished time.Time
 }
 
 // Keep only the latest run for each fixed role; each run still owns its tracker.
 type runTracking struct {
 	mu      sync.Mutex
-	latest  map[string]*progress.Tracker
+	latest  map[string]*trackedRun
 	changed chan struct{}
 }
 
 func newRunTracking() *runTracking {
-	return &runTracking{latest: make(map[string]*progress.Tracker), changed: make(chan struct{}, 1)}
+	return &runTracking{latest: make(map[string]*trackedRun), changed: make(chan struct{}, 1)}
 }
 
 func (t *runTracking) observer(name string) llm.ProgressObserver {
 	return llm.ProgressObserverFunc(func(event llm.ProgressEvent) {
 		t.mu.Lock()
-		tracker := t.latest[name]
-		if event.Kind == llm.ProgressRunStarted && (tracker == nil || tracker.Snapshot().RunID != event.RunID) {
-			tracker = progress.NewTracker()
-			t.latest[name] = tracker
+		run := t.latest[name]
+		if event.Kind == llm.ProgressRunStarted && (run == nil || run.tracker.Snapshot().RunID != event.RunID) {
+			run = &trackedRun{tracker: progress.NewTracker(), started: time.Now()}
+			t.latest[name] = run
 		}
-		if tracker != nil {
-			tracker.OnProgress(event)
+		if run != nil {
+			run.tracker.OnProgress(event)
+			if (event.Kind == llm.ProgressRunSucceeded || event.Kind == llm.ProgressRunFailed) && run.finished.IsZero() && run.tracker.Snapshot().RunID == event.RunID {
+				run.finished = time.Now()
+			}
 		}
 		t.mu.Unlock()
 		// The callback only records state and signals; the status loop owns output.
@@ -175,22 +136,35 @@ func (t *runTracking) snapshots() []namedSnapshot {
 	defer t.mu.Unlock()
 	var snapshots []namedSnapshot
 	for _, name := range []string{"coordinator", "researcher", "analyst"} {
-		if tracker := t.latest[name]; tracker != nil {
-			snapshots = append(snapshots, namedSnapshot{Agent: name, Snapshot: tracker.Snapshot()})
+		if run := t.latest[name]; run != nil {
+			end := run.finished
+			if end.IsZero() {
+				end = time.Now()
+			}
+			snapshots = append(snapshots, namedSnapshot{Agent: name, Elapsed: end.Sub(run.started).Round(time.Second).String(), Snapshot: run.tracker.Snapshot()})
 		}
 	}
 	return snapshots
 }
 
-func (t *runTracking) printChanges(out io.Writer, previous map[string]progress.Snapshot) error {
+func (t *runTracking) printChanges(out io.Writer, previous map[string]progress.Snapshot, heartbeat bool) error {
 	for _, snapshot := range t.snapshots() {
 		last := previous[snapshot.Agent]
 		if last.RunID == snapshot.RunID && last.Version == snapshot.Version {
+			if heartbeat && snapshot.Status == "running" {
+				if _, err := fmt.Fprintf(out, "HEARTBEAT %-11s run=%s elapsed=%s still_running stage=%s version=%d\n", snapshot.Agent, snapshot.RunID, snapshot.Elapsed, snapshot.Stage, snapshot.Version); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		if _, err := fmt.Fprintf(out, "STATUS %-11s run=%s status=%s stage=%s tools=%d/%d milestones=%q\n",
-			snapshot.Agent, snapshot.RunID, snapshot.Status, snapshot.Stage,
-			len(snapshot.CompletedTools), len(snapshot.FailedTools), snapshot.Milestones); err != nil {
+		latest := ""
+		if len(snapshot.Milestones) > 0 {
+			latest = snapshot.Milestones[len(snapshot.Milestones)-1]
+		}
+		if _, err := fmt.Fprintf(out, "STATUS %-11s run=%s elapsed=%s status=%s stage=%s tools=%d/%d milestones=%d latest=%q version=%d\n",
+			snapshot.Agent, snapshot.RunID, snapshot.Elapsed, snapshot.Status, snapshot.Stage,
+			len(snapshot.CompletedTools), len(snapshot.FailedTools), len(snapshot.Milestones), latest, snapshot.Version); err != nil {
 			return err
 		}
 		previous[snapshot.Agent] = snapshot.Snapshot
@@ -205,6 +179,9 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 	if strings.TrimSpace(cfg.task) == "" || cfg.timeout <= 0 || cfg.statusInterval <= 0 {
 		return errors.New("task must be nonblank; timeout and status interval must be positive")
 	}
+	if cfg.stepDelay < 0 {
+		return errors.New("step delay cannot be negative")
+	}
 	client, _, err := openrouter.NewClient(openrouter.ClientConfig{
 		APIKey: cfg.apiKey, BaseURL: cfg.baseURL, Timeout: time.Minute,
 		Provider: openrouter.ProviderPreferences{ExtraFields: map[string]any{"require_parameters": true}},
@@ -213,7 +190,7 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 		return err
 	}
 	tracking := newRunTracking()
-	coordinator, err := newCoordinator(client, cfg.model, tracking)
+	coordinator, err := newCoordinator(client, cfg.model, tracking, cfg.stepDelay)
 	if err != nil {
 		return err
 	}
@@ -232,11 +209,13 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 	defer ticker.Stop()
 	previous := make(map[string]progress.Snapshot)
 	for {
+		heartbeat := false
 		select {
 		case <-tracking.changed:
 		case <-ticker.C:
+			heartbeat = true
 		case result := <-done:
-			printErr := tracking.printChanges(out, previous)
+			printErr := tracking.printChanges(out, previous, false)
 			if result.err == nil {
 				_, err = fmt.Fprintf(out, "\nFINAL ANSWER (demo supplier data)\n%s\n", result.output.Content)
 			}
@@ -245,7 +224,7 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 			encoder.SetIndent("", "  ")
 			return errors.Join(result.err, printErr, err, headingErr, encoder.Encode(tracking.snapshots()))
 		}
-		if err := tracking.printChanges(out, previous); err != nil {
+		if err := tracking.printChanges(out, previous, heartbeat); err != nil {
 			cancel()
 			result := <-done
 			return errors.Join(err, result.err)

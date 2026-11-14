@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -16,12 +17,14 @@ import (
 	"time"
 
 	"github.com/beowulf20/kisaragi-kit/pkg/llm"
+	"github.com/beowulf20/kisaragi-kit/pkg/llm/progress"
 )
 
 type outputBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-	status chan struct{}
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	status    chan struct{}
+	heartbeat chan struct{}
 }
 
 func (b *outputBuffer) Write(data []byte) (int, error) {
@@ -31,6 +34,12 @@ func (b *outputBuffer) Write(data []byte) (int, error) {
 	if bytes.Contains(data, []byte("status=running")) {
 		select {
 		case b.status <- struct{}{}:
+		default:
+		}
+	}
+	if bytes.Contains(data, []byte("HEARTBEAT")) {
+		select {
+		case b.heartbeat <- struct{}{}:
 		default:
 		}
 	}
@@ -110,32 +119,54 @@ func fixtureServer(t *testing.T, gate <-chan struct{}, entered chan<- struct{}, 
 		system := request.Messages[0].Content
 		switch {
 		case strings.HasPrefix(system, "You are the researcher."):
-			if toolResults == 0 {
+			switch toolResults {
+			case 0:
 				toolName, callID, arguments = "lookup_catalog", "catalog-1", `{"category":"sensor"}`
-			} else {
+			case 1:
 				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"unit_price_cents":2400`) {
 					t.Error("catalog result not returned to provider")
 				}
-				content = "Demo catalog verified: north, south, west."
+				toolName, callID, arguments = "check_inventory", "inventory-1", `{"quantity":10}`
+			case 2:
+				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"sufficient":true`) {
+					t.Error("inventory result missing")
+				}
+				toolName, callID, arguments = "check_delivery", "delivery-1", `{"max_days":7}`
+			default:
+				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"within_deadline":false`) {
+					t.Error("delivery exclusion missing")
+				}
+				content = "Demo catalog verified: north, south, west. All can stock 10, but south misses the 7-day deadline."
 			}
 		case strings.HasPrefix(system, "You are the analyst."):
-			if toolResults == 0 {
+			switch toolResults {
+			case 0:
 				toolName, callID, arguments = "calculate_quotes", "quotes-1", `{"quantity":10}`
-			} else {
+			case 1:
 				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"total_cents":25000`) {
 					t.Error("computed quote not returned to provider")
 				}
-				content = "Demo west delivered total is 25000 cents for 10 sensors, lowest among available quotes."
+				toolName, callID, arguments = "evaluate_scenarios", "scenarios-1", `{"quantities":[10,20,30],"max_days":7}`
+			case 2:
+				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"total_cents":73200`) {
+					t.Error("30-unit scenario result missing")
+				}
+				toolName, callID, arguments = "audit_recommendation", "audit-1", `{"supplier_id":"west","quantity":10,"max_days":7,"total_cents":25000}`
+			default:
+				if !strings.Contains(request.Messages[len(request.Messages)-1].Content, `"approved":true`) {
+					t.Error("recommendation audit missing")
+				}
+				content = "Audited demo west total: 25000 cents for 10 sensors. Scenarios: west for 10; north for 20/30 under the deadline."
 			}
 		case strings.HasPrefix(system, "You are the coordinator."):
 			switch toolResults {
 			case 0:
-				toolName, callID, arguments = "agent_researcher", "research-1", `{"query":"Verify demo sensor suppliers for 10 units."}`
+				toolName, callID, arguments = "agent_researcher", "research-1", `{"query":"Verify demo catalog, stock for 10 sensors, and delivery under a 7-day deadline."}`
 			case 1:
 				if request.Messages[len(request.Messages)-1].ToolCallID != "research-1" || !strings.Contains(request.Messages[len(request.Messages)-1].Content, "Demo catalog verified") {
 					t.Error("research delegation result missing")
 				}
-				toolName, callID, arguments = "agent_analyst", "analysis-1", `{"query":"Demo catalog verified north, south, west. Calculate and compare delivered totals for 10 sensors."}`
+				toolName, callID, arguments = "agent_analyst", "analysis-1", `{"query":"Demo catalog verified north/south/west; south misses 7 days. Quote primary quantity 10, compare scenarios 10/20/30 under 7 days, and audit the primary recommendation."}`
 			default:
 				content = "Demo recommendation: west, 25000 cents delivered for 10 sensors. These are local fixture prices, not live quotes."
 			}
@@ -201,7 +232,7 @@ func TestTrackedOpenRouterWorkflow(t *testing.T) {
 	}
 	output := out.String()
 	snapshots := finalSnapshots(t, output)
-	if calls.Load() != 7 || len(snapshots) != 3 || !strings.Contains(output, "Demo recommendation: west, 25000 cents") {
+	if calls.Load() != 11 || len(snapshots) != 3 || !strings.Contains(output, "Demo recommendation: west, 25000 cents") {
 		t.Fatalf("calls=%d output=%s", calls.Load(), output)
 	}
 	ids := make(map[string]bool)
@@ -216,11 +247,11 @@ func TestTrackedOpenRouterWorkflow(t *testing.T) {
 				t.Fatal(s)
 			}
 		case "researcher":
-			if !slices.Equal(s.CompletedTools, []string{"lookup_catalog"}) || len(s.Milestones) != 1 || !strings.Contains(s.Milestones[0], "Verified 3") {
+			if !slices.Equal(s.CompletedTools, []string{"lookup_catalog", "check_inventory", "check_delivery"}) || len(s.Milestones) != 7 || !strings.Contains(s.Milestones[0], "Verified 3") {
 				t.Fatal(s)
 			}
 		case "analyst":
-			if !slices.Equal(s.CompletedTools, []string{"calculate_quotes"}) || len(s.Milestones) != 1 || !strings.Contains(s.Milestones[0], "3 available demo quotes") {
+			if !slices.Equal(s.CompletedTools, []string{"calculate_quotes", "evaluate_scenarios", "audit_recommendation"}) || len(s.Milestones) != 9 || !strings.Contains(s.Milestones[8], "approved=true") {
 				t.Fatal(s)
 			}
 		}
@@ -300,21 +331,197 @@ func TestRunTrackingReplacesOnlyTheRepeatedRole(t *testing.T) {
 }
 
 func TestExampleConfigurationAndDemoTools(t *testing.T) {
+	demo := demoTools{}
 	for _, cfg := range []config{{}, {apiKey: "key", model: "model", task: "", timeout: time.Second, statusInterval: time.Second}, {apiKey: "key", model: "model", task: "task", timeout: -time.Second, statusInterval: time.Second}, {apiKey: "key", model: "model", task: "task", timeout: time.Second, statusInterval: 0}} {
 		if err := run(t.Context(), cfg, &bytes.Buffer{}); err == nil {
 			t.Fatal("accepted invalid configuration")
 		}
 	}
 	for _, q := range []int{0, 101} {
-		if _, err := calculateQuotes(t.Context(), quoteInput{q}); err == nil {
+		if _, err := demo.calculateQuotes(t.Context(), quoteInput{q}); err == nil {
 			t.Fatal("accepted invalid quantity")
 		}
 	}
-	quotes, err := calculateQuotes(t.Context(), quoteInput{10})
+	quotes, err := demo.calculateQuotes(t.Context(), quoteInput{10})
 	if err != nil || len(quotes) != 3 || quotes[2].SupplierID != "west" || quotes[2].TotalCents != 25000 {
 		t.Fatalf("quotes=%v err=%v", quotes, err)
 	}
-	if _, err := lookupCatalog(t.Context(), catalogInput{"unknown"}); err == nil {
+	if _, err := demo.lookupCatalog(t.Context(), catalogInput{"unknown"}); err == nil {
 		t.Fatal("accepted unknown category")
+	}
+}
+
+func TestHeartbeatLeavesTrackerUnchanged(t *testing.T) {
+	tracking := newRunTracking()
+	observer := tracking.observer("coordinator")
+	observer.OnProgress(llm.ProgressEvent{RunID: "one", Kind: llm.ProgressRunStarted, Time: time.Now().UTC()})
+	previous := make(map[string]progress.Snapshot)
+	var out bytes.Buffer
+	if err := tracking.printChanges(&out, previous, false); err != nil {
+		t.Fatal(err)
+	}
+	before := tracking.snapshots()[0].Snapshot
+	out.Reset()
+	if err := tracking.printChanges(&out, previous, false); err != nil || out.Len() != 0 {
+		t.Fatal("unchanged notification emitted output")
+	}
+	for i := 0; i < 2; i++ {
+		if err := tracking.printChanges(&out, previous, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Count(out.String(), "HEARTBEAT") != 2 || !strings.Contains(out.String(), "still_running") || !strings.Contains(out.String(), "version=1") {
+		t.Fatal(out.String())
+	}
+	if !reflect.DeepEqual(before, tracking.snapshots()[0].Snapshot) {
+		t.Fatal("heartbeat changed progress state")
+	}
+	observer.OnProgress(llm.ProgressEvent{RunID: "one", Kind: llm.ProgressRunSucceeded, Time: time.Now().UTC()})
+	if err := tracking.printChanges(&out, previous, false); err != nil {
+		t.Fatal(err)
+	}
+	frozen := tracking.snapshots()[0].Elapsed
+	out.Reset()
+	if err := tracking.printChanges(&out, previous, true); err != nil || out.Len() != 0 || tracking.snapshots()[0].Elapsed != frozen {
+		t.Fatal("terminal run heartbeat/elapsed changed")
+	}
+}
+
+func TestPeriodicHeartbeatDuringProviderWait(t *testing.T) {
+	gate, entered := make(chan struct{}), make(chan struct{})
+	server, _ := fixtureServer(t, gate, entered, false)
+	defer server.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cfg := testConfig(server)
+	cfg.statusInterval = 2 * time.Millisecond
+	out := &outputBuffer{status: make(chan struct{}, 1), heartbeat: make(chan struct{}, 1)}
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, cfg, out) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	select {
+	case <-out.heartbeat:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no heartbeat while provider waited")
+	}
+	var lastVersion string
+	found := false
+	for _, line := range strings.Split(out.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "STATUS" {
+			lastVersion = fields[len(fields)-1]
+		}
+		if fields[0] == "HEARTBEAT" {
+			if fields[len(fields)-1] != lastVersion {
+				t.Fatalf("heartbeat changed version: %s", line)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("heartbeat output missing")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	s := finalSnapshots(t, out.String())
+	if len(s) != 1 || len(s[0].Milestones) != 0 || s[0].Status != "failed" {
+		t.Fatal(s)
+	}
+}
+
+func TestPacingCancellationAndFastMode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := (demoTools{delay: time.Hour}).step(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("pacing ignored cancellation")
+	}
+	if err := (demoTools{}).step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := fixtureServer(t, nil, nil, false)
+	defer server.Close()
+	cfg := testConfig(server)
+	cfg.stepDelay = -time.Second
+	if err := run(t.Context(), cfg, &bytes.Buffer{}); err == nil {
+		t.Fatal("accepted negative step delay")
+	}
+}
+
+func TestScenarioAndRecommendationFacts(t *testing.T) {
+	demo := demoTools{}
+	stock, err := demo.checkInventory(t.Context(), quoteInput{30})
+	if err != nil || len(stock) != 3 || stock[2].Sufficient || !stock[0].Sufficient {
+		t.Fatalf("stock=%v err=%v", stock, err)
+	}
+	delivery, err := demo.checkDelivery(t.Context(), deliveryInput{7})
+	if err != nil || len(delivery) != 3 || delivery[1].WithinDeadline || !delivery[2].WithinDeadline {
+		t.Fatalf("delivery=%v err=%v", delivery, err)
+	}
+	scenarios, err := demo.evaluateScenarios(t.Context(), scenarioInput{Quantities: []int{10, 20, 30, 50}, MaxDays: 7})
+	if err != nil || len(scenarios) != 4 {
+		t.Fatalf("scenarios=%v err=%v", scenarios, err)
+	}
+	for i, want := range []struct {
+		id    string
+		total int
+	}{{"west", 25000}, {"north", 49200}, {"north", 73200}} {
+		if scenarios[i].Cheapest == nil || scenarios[i].Cheapest.SupplierID != want.id || scenarios[i].Cheapest.TotalCents != want.total {
+			t.Fatal(scenarios)
+		}
+	}
+	if scenarios[3].Cheapest != nil {
+		t.Fatal("invented an unavailable supplier")
+	}
+	for _, tc := range []struct {
+		name     string
+		input    auditInput
+		approved bool
+	}{
+		{"correct", auditInput{"west", 10, 7, 25000}, true},
+		{"tied_cheapest", auditInput{"west", 12, 7, 30000}, true},
+		{"wrong_total", auditInput{"west", 10, 7, 24999}, false},
+		{"no_stock", auditInput{"west", 30, 7, 75000}, false},
+		{"late", auditInput{"south", 10, 7, 25400}, false},
+		{"not_cheapest", auditInput{"north", 10, 7, 25200}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := demo.auditRecommendation(t.Context(), tc.input)
+			if err != nil || result.Approved != tc.approved {
+				t.Fatalf("audit=%#v err=%v", result, err)
+			}
+			if result.Approved && result.CheapestSupplierID != tc.input.SupplierID {
+				t.Fatal("approved supplier not identified")
+			}
+		})
+	}
+	for _, input := range []scenarioInput{{Quantities: nil, MaxDays: 7}, {Quantities: []int{10, 10}, MaxDays: 7}, {Quantities: []int{0}, MaxDays: 7}, {Quantities: []int{101}, MaxDays: 7}, {Quantities: []int{1, 2, 3, 4, 5, 6}, MaxDays: 7}, {Quantities: []int{10}, MaxDays: 0}} {
+		if _, err := demo.evaluateScenarios(t.Context(), input); err == nil {
+			t.Fatal("accepted invalid scenarios")
+		}
+	}
+	if _, err := demo.checkInventory(t.Context(), quoteInput{0}); err == nil {
+		t.Fatal("accepted invalid stock quantity")
+	}
+	if _, err := demo.checkDelivery(t.Context(), deliveryInput{61}); err == nil {
+		t.Fatal("accepted invalid delivery deadline")
+	}
+	for _, input := range []auditInput{{"unknown", 10, 7, 25000}, {"west", 0, 7, 25000}, {"west", 10, 0, 25000}, {"west", 10, 7, -1}} {
+		if _, err := demo.auditRecommendation(t.Context(), input); err == nil {
+			t.Fatal("accepted invalid audit")
+		}
 	}
 }
