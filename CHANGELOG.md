@@ -9,6 +9,14 @@
 * **guardrail:** add attachable tool-metadata leakage matcher
 * **tool:** add central policy hooks and validated approval flow
 
+## [1.10.0](https://github.com/beowulf20/kisaragi-kit/compare/v1.9.1...v1.10.0) (2026-11-17)
+
+
+### Features
+
+* **llm:** add per-run progress observation ([13f1399](https://github.com/beowulf20/kisaragi-kit/commit/13f13999a03b507bed7011d3f95fe418bf96ee46))
+* **llm:** add per-run progress observation ([97b5f72](https://github.com/beowulf20/kisaragi-kit/commit/97b5f724b6468c0c0c7f2cdfb764fe31c1ca98e9))
+
 ## [1.9.1](https://github.com/beowulf20/kisaragi-kit/compare/v1.9.0...v1.9.1) (2026-07-16)
 
 
