@@ -28,6 +28,7 @@ go get github.com/beowulf20/kisaragi-kit
 | `pkg/llm` | Provider-neutral message types, completion loop, hook events, tool-call transcript handling. |
 | `pkg/llm/tool` | Generic `NewTool[I, O]` helper, toolbox registry, JSON schema generation, typed input decoding. |
 | `pkg/llm/agent` | Stateful agents with persistent messages, transient runs, streaming hooks, and `AsTool()` delegation. |
+| `pkg/llm/progress` | Bounded, thread-safe progress snapshots for one run, independent of agent locks. |
 | `pkg/llm/guardrail` | Attachable message guardrails for system-prompt and internal tool-metadata leaks. |
 | `pkg/llm/provider/openai` | OpenAI-compatible client adapter, streaming conversion, model listing, and tool/message translation. |
 | `pkg/llm/provider/openrouter` | Typed OpenRouter client configuration and client-wide provider routing controls. |
@@ -332,6 +333,196 @@ Hooks: llm.CompletionHooks{
 `OnEvent` uses KKit-owned event structs such as `EventAssistantMessage`, `EventToolCall`, `EventReasoningDelta`, and `EventUsage`. The `llm.Event` interface has an unexported marker method by design, so external packages can consume core events but cannot define custom event types.
 
 When `OnEvent` aborts, `Completion` returns `ErrCompletionEventAborted` wrapped in the error. If a provider response was already available, the partial `CompletionCallOutput` preserves completed content, usage, and generated assistant transcript messages before returning. Abort before a provider response, such as during streamed content or reasoning, can return no transcript message.
+
+## Progress observation
+
+Attach a non-abortable observer through `CompletionCallInput.ProgressObserver`,
+including `agent.NewAgentInput.Config`. Import the optional tracker from
+`github.com/beowulf20/kisaragi-kit/pkg/llm/progress`:
+
+```go
+tracker := progress.NewTracker()
+config := llm.CompletionCallInput{
+	Client: client, Model: "your-model", Tools: *toolbox,
+	ProgressObserver: tracker,
+}
+// Pass config as agent.NewAgentInput.Config or call llm.Completion(config).
+// Supply Messages for a direct Completion call.
+snapshot := tracker.Snapshot() // Safe while the agent is busy.
+```
+
+Each validated completion emits `run_started`, generation start/finish events,
+tool start/succeeded/failed events, explicit milestones, and exactly one
+`run_succeeded` or `run_failed`. Every invocation has a fresh RunID, UTC event
+times, and zero-based Round/Attempt values. Invalid configuration emits no
+events. Each started attempt gets an outcome, including hook aborts and failures;
+a pre-tool hook or budget abort starts no tool attempt. Tool success means its
+result passed the execution flow's hooks and guards. A failed tool may still be
+followed by a successful run when the model recovers.
+
+Inside a registered tool handler, report only verified business progress:
+
+```go
+llm.ReportMilestone(ctx, "Found 3 matching records")
+```
+
+Missing observation, blank messages, and reports after the tool returns are
+no-ops. Tool completion alone does not establish a business accomplishment.
+Parent observation sees a delegation tool; configure child observation separately
+for its internal events and separate RunID. Child contexts do not inherit the
+parent's milestone reporting scope; streams are not automatically merged.
+
+Observers return no error and their panics are recovered without changing the
+agent's result. Existing `Hooks.OnEvent` remains abortable. Callbacks are
+synchronous, serialized within a run, and must return quickly: queue work or
+update an in-memory tracker, rather than calling networks, databases, or an LLM.
+Do not recursively report progress from callbacks. An observer shared across
+runs must handle concurrent calls. No progress event is emitted for streamed
+content/reasoning tokens, and no percentage or ETA is inferred.
+
+Events never automatically include prompts, arguments, results, reasoning,
+approval payloads, or raw errors. ErrorKind uses fixed categories such as
+`provider_error`, `tool_error`, `invalid_result`, `policy_denied`,
+`approval_denied`, `guardrail_blocked`, `hook_aborted`, `limit_exceeded`,
+`usage_unavailable`, `canceled`, `deadline_exceeded`, and `panic`. Success has an
+empty ErrorKind. Tool-handler panics already converted by the toolbox remain
+ordinary `tool_error` outcomes. Tool names/IDs are internal metadata; explicit
+milestone text is trusted caller data and may itself contain secrets. Map/redact
+these strings before presenting them to users.
+
+### Tracker ownership and limits
+
+A tracker binds to its first valid `run_started` and never resets. It ignores
+other RunIDs, pre-start/stale events, and everything after its terminal status.
+Use one tracker per job/run. For a persistent agent serving successive jobs,
+an application-owned observer can route RunIDs to separate trackers; do not
+mutate agent configuration during execution. Snapshot reads copy slices and
+acquire no agent lock. Version changes only for meaningful activity/outcomes;
+UpdatedAt never moves backward. Before start, Snapshot returns zero values.
+
+Default retention keeps the latest 100 successful calls, 100 failed calls, and
+100 milestones, clipping tool names/milestone strings to 1024 bytes on UTF-8
+boundaries. Repeated tool names remain separate calls; outcomes require matching
+tool starts. Old entries are evicted; retained memory and call identity storage
+stay bounded. Duplicate retained milestones are ignored. This is a lossy snapshot,
+not a complete event log or permanent replay-deduplication store. SDK RunIDs are
+short; tracker input rejects empty IDs and IDs longer than 1024 bytes.
+
+```go
+tracker, err := progress.NewTrackerWithConfig(progress.Config{
+	MaxCompletedTools: 50,
+	MaxFailedTools:    20,
+	MaxMilestones:     25,
+	MaxStringBytes:    512,
+})
+if err != nil {
+	return err
+}
+```
+
+Zero config fields select defaults; negative values return an error. Configuration
+is copied at construction. `NewTracker()` remains the default convenience API.
+
+### Application notifications, including WhatsApp
+
+Associate RunID with your application job/conversation ID and persist meaningful
+snapshots outside the callback. Send an initial acknowledgment when accepting a
+job. A separate scheduler can check every 60–90 seconds and notify only after a
+meaningful Version change and a cooldown such as three minutes. A STATUS command
+reads the latest snapshot without interrupting or invoking the busy agent; its
+history snapshot is updated at the end of completion and is not a live trace.
+
+Send one idempotent terminal notification and stop periodic updates. Use a durable
+job queue/store for production restart recovery; this tracker is process-local.
+If an LLM rewrites updates, use a separate, stateless call over the original
+request and safe snapshot. Treat strings as data, use only verified milestones,
+and never invent results, percentages, or ETAs. Keep scheduling, deduplication,
+WhatsApp sends, and session/template-window rules in the application.
+
+Run the offline example without credentials:
+
+```bash
+go run ./examples/progress
+```
+
+It prints lifecycle events, an explicit milestone, a STATUS snapshot while a
+tool is blocked on a channel, and a final successful snapshot.
+
+Caller context cancellation or expiry now stops further provider attempts for
+both observed and unobserved calls. Provider-local timeout errors still follow
+the configured retry policy while the caller context is active.
+
+### Complex OpenRouter agent example
+
+`examples/progress-openrouter` uses the real OpenRouter adapter for a coordinator
+that delegates to researcher and analyst agents through `AsTool()`. The researcher
+checks the catalog, each supplier's stock, and delivery deadlines. The analyst
+calculates per-supplier quotes, compares quantity scenarios, then audits the
+primary recommendation's stock, delivery, exact total, and cheapest eligible
+selection. Supplier data and prices are local fixtures, not live integrations.
+
+The default task orders 10 sensors under a seven-day deadline and compares
+quantities 10, 20, and 30. Its six tools complete 16 verified-check milestones,
+including negative findings such as a supplier missing the deadline. An audit
+must return `approved=true` before a recommendation can be described as approved.
+
+```bash
+export OPENROUTER_API_KEY='your-key'
+export OPENROUTER_MODEL='provider/your-tool-capable-model'
+go run ./examples/progress-openrouter \
+  -status-interval 1s -step-delay 2s -timeout 3m
+```
+
+Each completed local demo check uses two seconds of simulated backend latency
+by default, making intermediate updates visible. Combined with model calls, the
+default scenario targets roughly one to two minutes; actual model latency varies.
+`-step-delay 0s` removes simulated latency for fast runs/tests. All pacing waits
+honor cancellation. A custom `-task` should specify the primary quantity, delivery
+deadline, and scenario quantities.
+
+Choose a model that supports tool calling. The example requests
+`provider.require_parameters=true`; optional `OPENROUTER_BASE_URL` overrides the
+default OpenRouter endpoint. Real runs use your account and may incur charges;
+the number and order of delegations depend on the selected model. Each agent has
+tool-round, provider-attempt, and tool-call limits; Ctrl+C and the overall timeout
+cancel the workflow.
+
+An independent status loop prints changed snapshots for each role. `tools=2/0`
+means two successful calls and zero failed calls; counts reflect retained tool
+outcomes, not a percentage. STATUS lines show elapsed time, milestone count, and
+the latest verified milestone; final snapshots retain the milestone tail. During
+quiet status ticks, HEARTBEAT lines say `still_running` and show the current stage
+and unchanged Version. Heartbeats do not invent milestones, update UpdatedAt,
+or emit output for finished runs. Observer callbacks only update trackers and signal a
+bounded channel, so terminal output never runs inside the callback. Every child
+run has its own RunID/tracker; repeated delegations replace only that role's
+latest tracker. Memory stays bounded to three roles and their configured snapshot
+tails. The coordinator's snapshot does not merge child milestones. Final output
+includes separate snapshots even on failure; it never queries a busy agent for
+status. These are technical diagnostics, not ready-to-send customer messages.
+
+The integration tests use a **local HTTP SSE fixture through the actual OpenRouter
+adapter**, checking the eleven-request workflow, sixteen milestones, audited
+facts, status/heartbeats while the provider is gated, repeated-run routing,
+timer cancellation, failures, and zero-delay fast mode. They need no API key
+or paid calls; passing them does not establish live model behavior:
+
+```bash
+go test -v ./examples/progress-openrouter
+```
+
+Model answers are written as UTF-8. If a Windows PowerShell console displays
+symbols such as `ÔÇö` or `┬ó`, select UTF-8 before running the example:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+go run ./examples/progress-openrouter
+```
+
+This configures the current console's output code page; see
+[Console.OutputEncoding](https://learn.microsoft.com/en-us/dotnet/api/system.console.outputencoding).
+The example reads process environment variables; `.env` files must be loaded by
+your shell or environment runner. Never commit credentials or live-run logs.
 
 ## Tests
 
